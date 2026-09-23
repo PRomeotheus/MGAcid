@@ -46,6 +46,10 @@ overlay_*.bin
 # The MHP3rd AOT corpora are derived from the user's executable
 /profiles/mhp3rd/generated/
 /profiles/mhp3rd/overlays/
+# The same for Metal Gear Ac!d
+/profiles/mga/generated/
+/profiles/mga/overlays/
+/profiles/mga/modules/
 
 # Local dumps next to the repository root
 /dump/

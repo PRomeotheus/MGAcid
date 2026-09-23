@@ -1,0 +1,25 @@
+// Entry point of one overlay library, configured from the overlay's meta.txt by
+// profiles/mga/CMakeLists.txt. Everything else in the library is psp_recomp
+// output carrying the @MGA_OVERLAY_PREFIX@ symbol prefix.
+#define MGA_OVERLAY_MODULE 1
+#include "overlay_module.hpp"
+
+#include "psprecomp/runtime.hpp"
+
+namespace psprecomp {
+void register_@MGA_OVERLAY_PREFIX@_functions(Runtime &runtime);
+}
+
+namespace {
+
+constexpr mga::OverlayModuleInfo kInfo{mga::kOverlayAbiVersion, @MGA_OVERLAY_BASE@u,
+                                          @MGA_OVERLAY_SIZE@u, @MGA_OVERLAY_CODE_SIZE@u,
+                                          @MGA_OVERLAY_HASH@ull, "@MGA_OVERLAY_NAME@"};
+
+} // namespace
+
+const mga::OverlayModuleInfo *mga_overlay_info() { return &kInfo; }
+
+void mga_register_overlay(psprecomp::Runtime &runtime) {
+    psprecomp::register_@MGA_OVERLAY_PREFIX@_functions(runtime);
+}

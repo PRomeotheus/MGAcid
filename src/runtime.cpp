@@ -207,7 +207,13 @@ bool Runtime::run_interpreter_fallback(AllegrexContext &ctx) {
     if (!interpreter_fallback_enabled()) return false;
     // Each entry is bounded, so a long interpreted stretch still returns to the
     // dispatcher often enough for the starvation hook to preempt the thread.
-    return interpret_allegrex(*this, ctx) != InterpreterExit::Unreachable;
+    try {
+        return interpret_allegrex(*this, ctx) != InterpreterExit::Unreachable;
+    } catch (const Error &e) {
+        // Name the interpreted instruction, as AOT faults name their unit.
+        throw Error(std::string(e.what()) + " while interpreting guest_pc=" + hex32(ctx.pc) +
+                    " (ra=" + hex32(ctx.gpr[31]) + " sp=" + hex32(ctx.gpr[29]) + " gp=" + hex32(ctx.gpr[28]) + ")");
+    }
 }
 
 bool Runtime::account_dispatch_work(AllegrexContext &ctx, bool allow_preemption) {

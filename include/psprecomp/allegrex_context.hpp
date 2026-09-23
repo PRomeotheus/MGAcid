@@ -616,6 +616,71 @@ struct alignas(16) AllegrexContext {
         write_vfpu_vector_with_destination_prefix(result, destination_register, destination_length);
     }
 
+    // VI2UC, VI2C, VI2US, VI2S: pack integer lanes into bytes or halfwords,
+    // the inverse of the VX2I family. The unsigned forms clamp negative lanes
+    // to zero; every form keeps the most significant bits of each lane.
+    void execute_vfpu_vi2x(std::uint32_t destination_register,
+                           std::uint32_t source_register,
+                           std::uint32_t source_length,
+                           std::uint32_t operation) noexcept {
+        if (source_length == 0u || source_length > 4u || operation > 3u) return;
+
+        float source[4]{};
+        read_vfpu_vector(source, source_register, source_length);
+        apply_vfpu_source_prefix(source, source_length, 0u);
+        std::int32_t lanes[4]{};
+        for (std::uint32_t lane = 0u; lane < source_length; ++lane)
+            lanes[lane] = static_cast<std::int32_t>(std::bit_cast<std::uint32_t>(source[lane]));
+
+        std::uint32_t result_bits[2]{};
+        std::uint32_t destination_length = 1u;
+        if (operation == 0u) { // VI2UC
+            for (std::uint32_t lane = 0u; lane < 4u; ++lane) {
+                const std::uint32_t value = lanes[lane] < 0 ? 0u : static_cast<std::uint32_t>(lanes[lane]) >> 23u;
+                result_bits[0] |= (value & 0xFFu) << (lane * 8u);
+            }
+        } else if (operation == 1u) { // VI2C
+            for (std::uint32_t lane = 0u; lane < 4u; ++lane)
+                result_bits[0] |= (static_cast<std::uint32_t>(lanes[lane]) >> 24u) << (lane * 8u);
+        } else { // VI2US / VI2S
+            destination_length = source_length == 4u ? 2u : 1u;
+            for (std::uint32_t pair = 0u; pair < destination_length; ++pair) {
+                const std::int32_t low = lanes[pair * 2u];
+                const std::int32_t high = lanes[pair * 2u + 1u];
+                if (operation == 2u) {
+                    const std::uint32_t low_bits = low < 0 ? 0u : static_cast<std::uint32_t>(low) >> 15u;
+                    const std::uint32_t high_bits = high < 0 ? 0u : static_cast<std::uint32_t>(high) >> 15u;
+                    result_bits[pair] = (low_bits & 0xFFFFu) | ((high_bits & 0xFFFFu) << 16u);
+                } else {
+                    result_bits[pair] = (static_cast<std::uint32_t>(low) >> 16u) |
+                                        (static_cast<std::uint32_t>(high) & 0xFFFF0000u);
+                }
+            }
+        }
+
+        float result[4]{};
+        for (std::uint32_t lane = 0u; lane < destination_length; ++lane)
+            result[lane] = std::bit_cast<float>(result_bits[lane]);
+        write_vfpu_vector_with_destination_prefix(result, destination_register, destination_length);
+    }
+
+    // VCRS.T: the half cross product, d = (s.y*t.z, s.z*t.x, s.x*t.y). Games
+    // pair it with a VSUB or a negated VCRS for the full cross product.
+    void execute_vfpu_vcrs(std::uint32_t destination_register, std::uint32_t source_register,
+                           std::uint32_t target_register) noexcept {
+        float source[4]{};
+        float target[4]{};
+        read_vfpu_vector(source, source_register, 3u);
+        read_vfpu_vector(target, target_register, 3u);
+        apply_vfpu_source_prefix(source, 3u, 0u);
+        apply_vfpu_source_prefix(target, 3u, 1u);
+        float result[4]{};
+        result[0] = source[1] * target[2];
+        result[1] = source[2] * target[0];
+        result[2] = source[0] * target[1];
+        write_vfpu_vector_with_destination_prefix(result, destination_register, 3u);
+    }
+
     template <std::uint32_t DestinationScalarRegister, std::uint32_t SourceRegister,
               std::uint32_t TargetRegister, std::uint32_t Length>
     PSPRECOMP_CONTEXT_FORCEINLINE void execute_vfpu_vdot_ct() noexcept {

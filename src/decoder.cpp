@@ -246,6 +246,10 @@ DecodedInstruction decode_allegrex(std::uint32_t word) {
         } else if (operation == 4u) {
             d.kind = OpcodeKind::Vhdp;
             d.mnemonic = "vhdp";
+        } else if (operation == 5u && ((word >> 7u) & 1u) == 0u && ((word >> 15u) & 1u) == 1u) {
+            // vcrs.t, the half cross product (vdet shares the sub-op at pair size).
+            d.kind = OpcodeKind::Vcrs;
+            d.mnemonic = "vcrs";
         } else {
             d.kind = OpcodeKind::Vfpu;
             d.mnemonic = "vfpu1";
@@ -310,6 +314,10 @@ DecodedInstruction decode_allegrex(std::uint32_t word) {
         } else if (group == 1u && operation == 19u) {
             d.kind = OpcodeKind::Vh2f;
             d.mnemonic = "vh2f";
+        } else if (group == 1u && operation >= 28u) {
+            d.kind = OpcodeKind::Vi2x;
+            static constexpr const char *names[4]{"vi2uc", "vi2c", "vi2us", "vi2s"};
+            d.mnemonic = names[operation - 28u];
         } else if (group == 1u && operation >= 24u && operation <= 27u) {
             d.kind = OpcodeKind::Vx2i;
             static constexpr const char *names[4]{"vuc2i", "vc2i", "vus2i", "vs2i"};

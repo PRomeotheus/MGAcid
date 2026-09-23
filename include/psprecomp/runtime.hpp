@@ -93,6 +93,19 @@ public:
     void register_function(std::uint32_t address, RecompiledFunction function, std::string name);
     void register_hle(std::string library, std::uint32_t nid, HleFunction function);
     [[nodiscard]] bool has_function(std::uint32_t address) const;
+    // The back edge of a guest loop that stays inside one generated unit.
+    // Without this the loop is a C++ goto cycle that never reaches the
+    // dispatcher, so nothing can preempt it: a game that spins waiting for
+    // another thread or an interrupt to set a flag hangs the emulator outright,
+    // where hardware would simply have scheduled the other thread. The caller
+    // sets ctx.pc to the branch target first and returns when this returns
+    // false, which means the scheduler handed the CPU to someone else.
+    [[nodiscard]] bool loop_boundary(AllegrexContext &ctx) { return account_dispatch_work(ctx, true); }
+    // What is registered at `address`, so a host can wrap it rather than
+    // replace it (a tracing trampoline that then runs the real code).
+    [[nodiscard]] RecompiledFunction registered_function(std::uint32_t address) const noexcept {
+        return lookup_function(address);
+    }
     [[nodiscard]] std::size_t function_count() const noexcept;
 
     void set_game_root(std::filesystem::path root);

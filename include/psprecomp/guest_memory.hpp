@@ -27,6 +27,10 @@ public:
     static constexpr std::uint32_t kVramMirrorCount = 4u;
     static constexpr std::uint32_t kVramAddressSpan = kVramSize * kVramMirrorCount;
     static constexpr std::uint32_t kPhysicalBase = 0x08000000u;
+    // The Allegrex's 16 KiB scratchpad RAM. Few games use it; the slow paths
+    // serve it, so it costs the main-RAM fast path nothing.
+    static constexpr std::uint32_t kScratchpadBase = 0x00010000u;
+    static constexpr std::uint32_t kScratchpadSize = 16u * 1024u;
 
     explicit GuestMemory(std::uint32_t size_bytes = 32u * 1024u * 1024u);
 
@@ -246,7 +250,9 @@ public:
     [[nodiscard]] const std::vector<std::uint8_t> &vram_bytes() const noexcept;
 
 private:
-    enum class Region { Vram, Ram };
+    // Void is the bit bucket PSPRECOMP_SOFT_FAULTS sends an access that lies
+    // outside guest memory to, instead of raising.
+    enum class Region { Vram, Ram, Scratchpad, Void };
     struct ResolvedAddress {
         Region region;
         std::size_t offset;
@@ -257,6 +263,14 @@ private:
     [[nodiscard]] std::size_t vram_offset(std::uint32_t canonical_address) const noexcept;
     [[nodiscard]] const std::vector<std::uint8_t> &region_bytes(Region region) const noexcept;
     [[nodiscard]] std::vector<std::uint8_t> &region_bytes(Region region) noexcept;
+    // PSPRECOMP_SOFT_FAULTS=1: an access outside guest memory reads zero and
+    // discards what it writes, with one line of warning, rather than stopping
+    // the run. A game that reads uninitialised stack the hardware happens to
+    // have something harmless in will run on; the results below that read are
+    // meaningless, so this is for finding out what comes next, never for
+    // shipping.
+    [[nodiscard]] static bool soft_faults() noexcept;
+    mutable std::vector<std::uint8_t> void_{std::vector<std::uint8_t>(16u, 0u)};
 
     // Canonicalize and rebase in one step.  An address below kPhysicalBase --
     // EDRAM included -- wraps to a value far above any RAM size, so a single
@@ -303,6 +317,7 @@ private:
 
     std::vector<std::uint8_t> vram_;
     std::vector<std::uint8_t> bytes_;
+    std::vector<std::uint8_t> scratchpad_;
     // Cached view of bytes_ for the inline fast paths.  Neither region is ever
     // resized after construction, so these stay valid for the object's life.
     //

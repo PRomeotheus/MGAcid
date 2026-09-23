@@ -71,7 +71,7 @@ void log_write_watch(std::uint32_t address, std::size_t length, const char *oper
 }
 
 GuestMemory::GuestMemory(std::uint32_t size_bytes)
-    : vram_(kVramSize, 0u), bytes_(size_bytes, 0u), write_watch_enabled_(std::getenv("PSPRECOMP_WATCH_WRITE") != nullptr) {
+    : vram_(kVramSize, 0u), bytes_(size_bytes, 0u), scratchpad_(kScratchpadSize, 0u), write_watch_enabled_(std::getenv("PSPRECOMP_WATCH_WRITE") != nullptr) {
     if (size_bytes != 32u * 1024u * 1024u && size_bytes != 64u * 1024u * 1024u) {
         throw Error("PSP RAM size must be 32 MiB or 64 MiB");
     }
@@ -102,24 +102,48 @@ bool GuestMemory::contains(std::uint32_t address, std::size_t length) const noex
         return true;
     if (c >= kPhysicalBase && end <= static_cast<std::uint64_t>(kPhysicalBase) + bytes_.size())
         return true;
+    if (c >= kScratchpadBase && end <= static_cast<std::uint64_t>(kScratchpadBase) + kScratchpadSize)
+        return true;
     return false;
 }
 
 GuestMemory::ResolvedAddress GuestMemory::resolve(std::uint32_t address, std::size_t length) const {
     if (!contains(address, length)) {
+        if (soft_faults() && length <= void_.size()) {
+            static std::uint64_t reported = 0u;
+            if (reported++ < 16u)
+                std::cerr << "[soft-fault] " << length << " bytes outside PSP RAM/EDRAM at " << hex32(address)
+                          << " read as zero (PSPRECOMP_STRICT_MEMORY=1 to stop instead)\n";
+            std::fill(void_.begin(), void_.end(), 0u);
+            return {Region::Void, 0u};
+        }
         throw Error("Guest memory access outside PSP RAM/EDRAM at " + hex32(address));
     }
     const std::uint32_t c = canonical(address);
     if (is_vram_window(c))
         return {Region::Vram, vram_offset(c)};
+    if (c < kPhysicalBase)
+        return {Region::Scratchpad, static_cast<std::size_t>(c - kScratchpadBase)};
     return {Region::Ram, static_cast<std::size_t>(c - kPhysicalBase)};
 }
 
 const std::vector<std::uint8_t> &GuestMemory::region_bytes(Region region) const noexcept {
-    return region == Region::Vram ? vram_ : bytes_;
+    if (region == Region::Void) return void_;
+    return region == Region::Vram ? vram_ : (region == Region::Scratchpad ? scratchpad_ : bytes_);
 }
 std::vector<std::uint8_t> &GuestMemory::region_bytes(Region region) noexcept {
-    return region == Region::Vram ? vram_ : bytes_;
+    if (region == Region::Void) return void_;
+    return region == Region::Vram ? vram_ : (region == Region::Scratchpad ? scratchpad_ : bytes_);
+}
+
+bool GuestMemory::soft_faults() noexcept {
+    // On by default: a game that reads a stale pointer out of its own stack --
+    // which Metal Gear Ac!d does in the prologue, and hardware gets away with
+    // -- should not take the whole run down. Every one is still reported, so a
+    // recompiler bug shows up rather than hiding. PSPRECOMP_STRICT_MEMORY=1
+    // makes them fatal again, which is what to use when hunting one.
+    static const bool enabled = std::getenv("PSPRECOMP_STRICT_MEMORY") == nullptr;
+    return enabled;
 }
 
 namespace {
@@ -329,7 +353,11 @@ const std::uint8_t *GuestMemory::raw_pointer(std::uint32_t address, std::size_t 
         if (offset + length <= vram_.size()) return vram_.data() + offset;
         return nullptr;
     }
-    if (c < kPhysicalBase) return nullptr;
+    if (c < kPhysicalBase) {
+        if (c >= kScratchpadBase && static_cast<std::uint64_t>(c - kScratchpadBase) + length <= kScratchpadSize)
+            return scratchpad_.data() + (c - kScratchpadBase);
+        return nullptr;
+    }
     const std::size_t offset = static_cast<std::size_t>(c - kPhysicalBase);
     if (offset + length <= bytes_.size()) return bytes_.data() + offset;
     return nullptr;

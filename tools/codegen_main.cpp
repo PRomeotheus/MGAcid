@@ -451,6 +451,16 @@ std::string emit_regular(const psprecomp::DecodedInstruction &d, std::uint32_t p
             << source_length << "u, " << operation << "u);\n";
         break;
     }
+    case psprecomp::OpcodeKind::Vi2x: {
+        const std::uint32_t size_code = ((d.word >> 7u) & 1u) | (((d.word >> 15u) & 1u) << 1u);
+        out << "    ctx.execute_vfpu_vi2x(" << (d.word & 0x7Fu) << "u, " << ((d.word >> 8u) & 0x7Fu) << "u, "
+            << (size_code + 1u) << "u, " << ((d.word >> 16u) & 3u) << "u);\n";
+        break;
+    }
+    case psprecomp::OpcodeKind::Vcrs:
+        out << "    ctx.execute_vfpu_vcrs(" << (d.word & 0x7Fu) << "u, " << ((d.word >> 8u) & 0x7Fu) << "u, "
+            << ((d.word >> 16u) & 0x7Fu) << "u);\n";
+        break;
     case psprecomp::OpcodeKind::Mtv:
         out << "    ctx.set_vfpu_scalar_bits(" << (d.word & 0xFFu) << "u, " << reg(d.rt) << ");\n";
         break;
@@ -883,6 +893,10 @@ std::string branch_condition(const psprecomp::DecodedInstruction &d) {
 // Corpus symbol prefix. The main executable keeps the historical names; an
 // overlay corpus passes its own prefix, which names both its registration entry
 // point and its units, so corpora stay distinguishable in one process.
+// How often a guest loop's back edge offers the scheduler the CPU. A power
+// of two so the test is an AND.
+constexpr std::uint32_t kLoopBoundaryPeriod = 256u;
+
 std::string g_symbol_prefix = "recomp";
 
 std::string generated_unit_cpp_name(std::uint32_t unit) {
@@ -916,18 +930,39 @@ void emit_target(std::ostringstream &body, std::uint32_t target,
                  std::uint32_t unit_span_bytes = 0u,
                  const std::map<std::uint32_t, std::uint16_t> *direct_entry_ids = nullptr,
                  const std::set<std::uint32_t> *import_stubs = nullptr,
-                 const std::set<std::uint32_t> *unit_indices = nullptr) {
-    if (labels.contains(target)) {
-        body << indent << "goto L_" << psprecomp::hex32(target).substr(2) << ";\n";
-        return;
-    }
-
+                 const std::set<std::uint32_t> *unit_indices = nullptr,
+                 std::uint32_t from_pc = 0u) {
     // A fixed J/JAL to a PSP import must return to the outer dispatcher.
     // Trying the generated-unit chain first is guaranteed to fail because import
     // registration deliberately poisons/replaces that exact PC, and these stubs
     // are frequently hot in real titles. Emit the minimal correct handoff directly.
+    // This comes before the same-unit label check: when the stub table falls in
+    // the caller's own unit, a goto would run the unlinked stub bytes
+    // ("jr $ra; nop") and the import would silently do nothing.
     if (import_stubs != nullptr && import_stubs->contains(target)) {
         body << indent << "ctx.pc = " << psprecomp::hex32(target) << "u; return;\n";
+        return;
+    }
+
+    if (labels.contains(target)) {
+        // A backward edge inside the unit is a loop the guest can sit in
+        // forever. Give the scheduler a chance to take the CPU away, the way
+        // the hardware's timer interrupt would, or a thread spinning on a flag
+        // another thread sets never sees it change. ctx.pc has to be the
+        // target, because that is where this thread resumes if it is switched
+        // out here.
+        if (from_pc != 0u && target <= from_pc) {
+            // Once every kLoopBoundaryPeriod times round, not every time: the
+            // check itself has to be nearly free, or a decompression loop pays
+            // a store and a call per byte. A few hundred iterations is still
+            // microseconds of preemption latency, and the counter lives in a
+            // register.
+            body << indent << "if ((++loop_ticks & " << (kLoopBoundaryPeriod - 1u) << "u) == 0u) {\n"
+                 << indent << "    ctx.pc = " << psprecomp::hex32(target) << "u;\n"
+                 << indent << "    if (!rt.loop_boundary(ctx)) return;\n"
+                 << indent << "}\n";
+        }
+        body << indent << "goto L_" << psprecomp::hex32(target).substr(2) << ";\n";
         return;
     }
 
@@ -1003,6 +1038,7 @@ std::string emit_function_source(const GeneratedFunctionInput &function,
         body << "void " << cpp_name << "_entry(Runtime &rt, AllegrexContext &ctx, std::uint16_t direct_entry_id, GuestMemory::AotFastView &aot_mem) {\n"
              << "    std::uint32_t jump_target = 0u;\n"
              << "    std::uint32_t local_transfers = 0u;\n"
+             << "    std::uint32_t loop_ticks = 0u;\n"
              << "    std::uint32_t local_pc = ctx.pc;\n"
              << "    std::uint32_t entry_id = direct_entry_id;\n"
              << "LOCAL_DISPATCH:\n"
@@ -1035,6 +1071,7 @@ std::string emit_function_source(const GeneratedFunctionInput &function,
              << "    (void)direct_entry_id;\n"
              << "    std::uint32_t jump_target = 0u;\n"
              << "    std::uint32_t local_transfers = 0u;\n"
+             << "    std::uint32_t loop_ticks = 0u;\n"
              << "LOCAL_DISPATCH:\n"
              << "    switch (ctx.pc) {\n";
         for (const auto label : function.entry_labels) {
@@ -1086,14 +1123,14 @@ std::string emit_function_source(const GeneratedFunctionInput &function,
                     if (likely_branch) {
                         body << "    if (" << condition << ") {\n"
                              << emit_regular(slot, pc + 4u);
-                        emit_target(body, target, function.entry_labels, "        ", function.executable_base, function.unit_span_bytes, function.direct_entry_ids, function.import_stubs, function.unit_indices);
+                        emit_target(body, target, function.entry_labels, "        ", function.executable_base, function.unit_span_bytes, function.direct_entry_ids, function.import_stubs, function.unit_indices, pc);
                         body << "    }\n";
                         emit_target(body, fallthrough, function.entry_labels, "    ", function.executable_base, function.unit_span_bytes, function.direct_entry_ids, function.import_stubs, function.unit_indices);
                     } else {
                         body << "    { const bool branch_taken = " << condition << ";\n"
                              << emit_regular(slot, pc + 4u)
                              << "      if (branch_taken) {\n";
-                        emit_target(body, target, function.entry_labels, "          ", function.executable_base, function.unit_span_bytes, function.direct_entry_ids, function.import_stubs, function.unit_indices);
+                        emit_target(body, target, function.entry_labels, "          ", function.executable_base, function.unit_span_bytes, function.direct_entry_ids, function.import_stubs, function.unit_indices, pc);
                         body << "      }\n";
                         emit_target(body, fallthrough, function.entry_labels, "      ", function.executable_base, function.unit_span_bytes, function.direct_entry_ids, function.import_stubs, function.unit_indices);
                         body << "    }\n";
@@ -1106,9 +1143,11 @@ std::string emit_function_source(const GeneratedFunctionInput &function,
                     }
                     body << emit_regular(slot, pc + 4u);
                     if (decoded.kind == psprecomp::OpcodeKind::J) {
-                        emit_target(body, target, function.entry_labels, "    ", function.executable_base, function.unit_span_bytes, function.direct_entry_ids, function.import_stubs, function.unit_indices);
-                    } else if (function.entry_labels.contains(target)) {
-                        // Fixed same-unit JAL: the destination is already a C++
+                        emit_target(body, target, function.entry_labels, "    ", function.executable_base, function.unit_span_bytes, function.direct_entry_ids, function.import_stubs, function.unit_indices, pc);
+                    } else if (function.entry_labels.contains(target) &&
+                               (function.import_stubs == nullptr || !function.import_stubs->contains(target))) {
+                        // Fixed same-unit JAL (never to an import stub, which
+                        // must leave for the dispatcher like any other import): the destination is already a C++
                         // label. Going through ctx.pc + LOCAL_DISPATCH needlessly
                         // re-decodes a dense entry id and burns the local-transfer
                         // counter. The delay slot and $ra write have already run.
@@ -1220,7 +1259,13 @@ void write_import_wrappers(std::ostream &out, const std::vector<psprecomp::PspIm
             << "    const RuntimeExecutionContextToken caller_context = capture_runtime_execution_context();\n"
             << "    const std::uint32_t import_pc = ctx.pc;\n"
             << "    const std::uint32_t return_address = ctx.gpr[31];\n"
-            << "    rt.invoke_import_cached(" << i << "u, \"" << cpp_escape(imports[i].library) << "\", "
+            // The binding cache is indexed by slot and shared by every corpus in
+            // the process, so only the main executable's corpus may use it; a
+            // prefixed corpus (a separately loaded module) resolves each call.
+            << (g_symbol_prefix == "recomp"
+                    ? "    rt.invoke_import_cached(" + std::to_string(i) + "u, \""
+                    : std::string("    rt.invoke_import(\""))
+            << cpp_escape(imports[i].library) << "\", "
             << psprecomp::hex32(imports[i].nid) << "u, ctx);\n"
             << "    if (!rt.stopped() && runtime_execution_context_matches(caller_context) &&\n"
             << "        ctx.pc == import_pc) ctx.pc = return_address;\n"

@@ -1261,6 +1261,51 @@ int main() {
         const auto vqmul = psprecomp::decode_allegrex(0xF2828180u);
         require(vqmul.kind == psprecomp::OpcodeKind::VcrossQuat && vqmul.mnemonic == "vqmul",
                 "VQMUL.Q classification failed");
+        const auto vcrs = psprecomp::decode_allegrex(0x66858406u);
+        require(vcrs.kind == psprecomp::OpcodeKind::Vcrs && vcrs.mnemonic == "vcrs", "VCRS.T classification failed");
+        const auto vi2uc = psprecomp::decode_allegrex(0xD03C8484u);
+        require(vi2uc.kind == psprecomp::OpcodeKind::Vi2x && vi2uc.mnemonic == "vi2uc",
+                "VI2UC.Q classification failed");
+        const auto vi2s = psprecomp::decode_allegrex(0xD03F88CCu);
+        require(vi2s.kind == psprecomp::OpcodeKind::Vi2x && vi2s.mnemonic == "vi2s", "VI2S.Q classification failed");
+        {
+            // C000 = (1, 2, 3), C010 = (4, 5, 6); vcrs.t C020 = (2*6, 3*4, 1*5).
+            psprecomp::AllegrexContext c{};
+            const float s[3]{1.0f, 2.0f, 3.0f};
+            const float t[3]{4.0f, 5.0f, 6.0f};
+            for (std::uint32_t i = 0; i < 3u; ++i) {
+                c.set_vfpu_scalar_bits(i * 32u, std::bit_cast<std::uint32_t>(s[i]));
+                c.set_vfpu_scalar_bits(1u + i * 32u, std::bit_cast<std::uint32_t>(t[i]));
+            }
+            c.eat_vfpu_prefixes();
+            c.execute_vfpu_vcrs(2u, 0u, 1u);
+            require(std::bit_cast<float>(c.vfpu_scalar_bits(2u)) == 12.0f &&
+                        std::bit_cast<float>(c.vfpu_scalar_bits(34u)) == 12.0f &&
+                        std::bit_cast<float>(c.vfpu_scalar_bits(66u)) == 5.0f,
+                    "VCRS.T result mismatch");
+            // vi2s.p: two lanes to one word of halfwords, high halves kept.
+            c.set_vfpu_scalar_bits(0u, 0x1234ABCDu);
+            c.set_vfpu_scalar_bits(32u, 0x5678EF01u);
+            c.eat_vfpu_prefixes();
+            c.execute_vfpu_vi2x(3u, 0u, 2u, 3u);
+            require(c.vfpu_scalar_bits(3u) == 0x56781234u, "VI2S.P result mismatch");
+            // vi2uc.q: negative lanes clamp to zero, others keep bits 30..23.
+            const std::uint32_t lanes[4]{0x7F800000u, 0x80000000u, 0x00800000u, 0x3F800000u};
+            for (std::uint32_t i = 0; i < 4u; ++i) c.set_vfpu_scalar_bits(i * 32u, lanes[i]);
+            c.eat_vfpu_prefixes();
+            c.execute_vfpu_vi2x(3u, 0u, 4u, 0u);
+            require(c.vfpu_scalar_bits(3u) == 0x7F0100FFu, "VI2UC.Q result mismatch");
+        }
+        {
+            // The 16 KiB scratchpad at 0x00010000, through both access paths.
+            psprecomp::GuestMemory scratch(32u * 1024u * 1024u);
+            scratch.store32(0x00010000u, 0x12345678u);
+            scratch.aot_store32(0x00013FFCu, 0xCAFEF00Du);
+            require(scratch.load32(0x00010000u) == 0x12345678u && scratch.aot_load32(0x00013FFCu) == 0xCAFEF00Du &&
+                        scratch.load32(0x40010000u) == 0x12345678u && scratch.contains(0x00013FFCu, 4u) &&
+                        !scratch.contains(0x00014000u, 4u),
+                    "scratchpad RAM access failed");
+        }
         const auto mtv = psprecomp::decode_allegrex(0x48E50021u);
         require(mtv.kind == psprecomp::OpcodeKind::Mtv && mtv.rt == 5u, "MTV classification failed");
         const auto lvs = psprecomp::decode_allegrex(0xC8A00000u);

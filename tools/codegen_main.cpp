@@ -775,6 +775,9 @@ std::string emit_regular(const psprecomp::DecodedInstruction &d, std::uint32_t p
             << "      ctx.write_vfpu_vector_with_destination_prefix(vfpu_d, " << destination << "u, " << length << "u); }\n";
         break;
     }
+    case psprecomp::OpcodeKind::VfpuRandom:
+        out << "    ctx.execute_vfpu_random(" << psprecomp::hex32(d.word) << "u);\n";
+        break;
     case psprecomp::OpcodeKind::Vcst: {
         static constexpr std::uint32_t constant_bits[32] = {
             0x00000000u, 0x7F7FFFFFu, 0x3FB504F3u, 0x3F3504F3u,

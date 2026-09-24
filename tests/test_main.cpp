@@ -246,6 +246,38 @@ static void test_interpreter_delay_slots_and_branch_likely() {
     require(ctx.gpr[10] == 5u, "Interpreter mishandled an ordinary branch delay slot");
 }
 
+// ADDI (a trap on signed overflow that PSP code never relies on) runs as
+// ADDIU, and the VFPU random-number group draws floats in the documented
+// ranges: vrndf1 in [1, 2), vrndf2 in [2, 4).
+static void test_interpreter_addi_and_vfpu_random() {
+    psprecomp::Runtime runtime;
+    runtime.register_function(kInterpreterExit, &interpreter_exit_function, "interpreter_exit");
+    load_program(runtime, kInterpreterBase, {
+        mips_i(0x08u, 0u, 8u, 5u),        // addi   t0, zero, 5
+        mips_i(0x08u, 8u, 8u, 0xFFFFu),   // addi   t0, t0, -1
+        0xD0220080u,                      // vrndf1.p C000
+        0xD0238004u,                      // vrndf2.t C100
+        mips_r(31u, 0u, 0u, 0u, 0x08u),   // jr     ra
+        0u,                               // nop
+    });
+    psprecomp::AllegrexContext ctx{};
+    ctx.pc = kInterpreterBase;
+    ctx.gpr[31] = kInterpreterExit;
+    (void)psprecomp::interpret_allegrex(runtime, ctx);
+    require(ctx.pc == kInterpreterExit, "ADDI or a VFPU random instruction stopped the interpreter");
+    require(ctx.gpr[8] == 4u, "ADDI did not add its signed immediate");
+    require(psprecomp::decode_allegrex(0xD0200000u).kind == psprecomp::OpcodeKind::VfpuRandom,
+            "vrnds is not decoded");
+    float first[4]{}, second[4]{};
+    ctx.read_vfpu_vector(first, 0u, 2u);
+    ctx.read_vfpu_vector(second, 4u, 3u);
+    for (std::uint32_t lane = 0; lane < 2u; ++lane)
+        require(first[lane] >= 1.0f && first[lane] < 2.0f, "vrndf1 left [1, 2)");
+    for (std::uint32_t lane = 0; lane < 3u; ++lane)
+        require(second[lane] >= 2.0f && second[lane] < 4.0f, "vrndf2 left [2, 4)");
+    require(first[0] != first[1], "vrndf1 filled two lanes with the same value");
+}
+
 static void test_interpreter_unaligned_word_access() {
     psprecomp::Runtime runtime;
     runtime.register_function(kInterpreterExit, &interpreter_exit_function, "interpreter_exit");
@@ -1046,6 +1078,7 @@ int main() {
         test_nested_direct_chain_context_guard();
         test_interpreter_delay_slots_and_branch_likely();
         test_interpreter_unaligned_word_access();
+        test_interpreter_addi_and_vfpu_random();
         test_interpreter_hi_lo();
         test_interpreter_floating_point();
         test_fpu_rounding_mode();

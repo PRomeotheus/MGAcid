@@ -596,6 +596,9 @@ bool execute_simple(Runtime &rt, AllegrexContext &ctx, const DecodedInstruction 
         ctx.execute_vfpu_horizontal(vfpu_vd(d.word), vfpu_vs(d.word), vfpu_length(d.word),
                                     ((d.word >> 16u) & 31u) == 7u);
         break;
+    case OpcodeKind::VfpuRandom:
+        ctx.execute_vfpu_random(d.word);
+        break;
     case OpcodeKind::Vrot:
         ctx.execute_vfpu_vrot(vfpu_vd(d.word), vfpu_vs(d.word), vfpu_length(d.word),
                               (d.word >> 16u) & 31u);

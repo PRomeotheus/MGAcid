@@ -29,6 +29,9 @@ struct alignas(16) AllegrexContext {
     // register views overlap; the final lowering layer will provide S/V/M views.
     std::array<float, 128> vfpu{};
     std::array<std::uint32_t, 16> vfpu_ctrl{};
+    // State of the VFPU's random number generator (vrnds seeds it; vrndi,
+    // vrndf1 and vrndf2 draw from it).
+    std::uint32_t vfpu_random_state{0x3F800001u};
 
 
     [[nodiscard]] PSPRECOMP_CONTEXT_FORCEINLINE std::uint32_t fpr_bits(std::uint32_t index) const noexcept {
@@ -1198,6 +1201,33 @@ struct alignas(16) AllegrexContext {
             result[lane] = source[lane] * target[lane];
         }
         write_vfpu_vector_with_destination_prefix(result, destination_register, length);
+    }
+
+    // VFPU4 group 1, operations 0..3: vrnds (seed from a scalar), vrndi (random
+    // words), vrndf1 (floats in [1, 2)) and vrndf2 (floats in [2, 4)). The
+    // hardware generator's sequence is not reproduced, only its ranges.
+    void execute_vfpu_random(std::uint32_t word) noexcept {
+        const std::uint32_t operation = (word >> 16u) & 31u;
+        const std::uint32_t size_code = ((word >> 7u) & 1u) | (((word >> 15u) & 1u) << 1u);
+        const std::uint32_t length = size_code + 1u;
+        if (operation == 0u) {
+            const std::uint32_t seed = vfpu_scalar_bits((word >> 8u) & 0x7Fu);
+            vfpu_random_state = seed != 0u ? seed : 0x3F800001u;
+            return;
+        }
+        float value[4]{};
+        for (std::uint32_t i = 0; i < length; ++i) {
+            std::uint32_t x = vfpu_random_state;
+            x ^= x << 13u;
+            x ^= x >> 17u;
+            x ^= x << 5u;
+            vfpu_random_state = x;
+            std::uint32_t bits = x;
+            if (operation == 2u) bits = 0x3F800000u | (x >> 9u);
+            else if (operation == 3u) bits = 0x40000000u | (x >> 9u);
+            value[i] = std::bit_cast<float>(bits);
+        }
+        write_vfpu_vector_with_destination_prefix(value, word & 0x7Fu, length);
     }
 
     void execute_vfpu_vrot(std::uint32_t destination_register, std::uint32_t source_register,

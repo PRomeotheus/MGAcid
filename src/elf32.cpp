@@ -341,8 +341,21 @@ std::optional<PspModuleInfo> Elf32Image::find_module_info(const GuestMemory &mem
     const auto section_it = std::find_if(sections_.begin(), sections_.end(), [](const ElfSection &section) {
         return section.name == ".rodata.sceModuleInfo" || section.name == ".sceModuleInfo";
     });
-    if (section_it == sections_.end() || section_it->size < sizeof(ModuleInfo32)) return std::nullopt;
-    const std::uint32_t addr = section_runtime_address(*section_it, load_base);
+    std::uint32_t addr = 0u;
+    if (section_it != sections_.end() && section_it->size >= sizeof(ModuleInfo32)) {
+        addr = section_runtime_address(*section_it, load_base);
+    } else {
+        // Stripped section names: a PRX records the file offset of its
+        // sceModuleInfo in the first loadable segment's p_paddr (bit 31 clear
+        // for user modules), which is what the PSP's own loader reads.
+        const auto first_load = std::find_if(segments_.begin(), segments_.end(),
+                                             [](const ElfSegment &segment) { return segment.type == kPtLoad; });
+        if (!is_psp_prx() || first_load == segments_.end()) return std::nullopt;
+        const std::uint32_t file_offset = first_load->paddr & 0x7FFFFFFFu;
+        if (file_offset < first_load->offset || file_offset - first_load->offset + sizeof(ModuleInfo32) > first_load->file_size)
+            return std::nullopt;
+        addr = load_base + first_load->vaddr + (file_offset - first_load->offset);
+    }
     if (!memory.contains(addr, sizeof(ModuleInfo32))) return std::nullopt;
 
     char name[28]{};

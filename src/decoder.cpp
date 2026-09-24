@@ -122,6 +122,9 @@ DecodedInstruction decode_allegrex(std::uint32_t word) {
     case 0x15: d.kind = OpcodeKind::Bnel; d.mnemonic = "bnel"; break;
     case 0x16: d.kind = OpcodeKind::Blezl; d.mnemonic = "blezl"; break;
     case 0x17: d.kind = OpcodeKind::Bgtzl; d.mnemonic = "bgtzl"; break;
+    // ADDI differs from ADDIU only by trapping on signed overflow, which PSP
+    // code never relies on, so it is carried out the same way.
+    case 0x08: d.kind = OpcodeKind::Addiu; d.mnemonic = "addi"; break;
     case 0x09: d.kind = OpcodeKind::Addiu; d.mnemonic = "addiu"; break;
     case 0x0A: d.kind = OpcodeKind::Slti; d.mnemonic = "slti"; break;
     case 0x0B: d.kind = OpcodeKind::Sltiu; d.mnemonic = "sltiu"; break;
@@ -308,6 +311,10 @@ DecodedInstruction decode_allegrex(std::uint32_t word) {
         if (group == 3u) {
             d.kind = OpcodeKind::Vcst;
             d.mnemonic = "vcst";
+        } else if (group == 1u && operation <= 3u) {
+            d.kind = OpcodeKind::VfpuRandom;
+            static constexpr const char *names[4]{"vrnds", "vrndi", "vrndf1", "vrndf2"};
+            d.mnemonic = names[operation];
         } else if (group == 1u && operation == 18u) {
             d.kind = OpcodeKind::Vf2h;
             d.mnemonic = "vf2h";

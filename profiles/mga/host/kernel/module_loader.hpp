@@ -52,6 +52,11 @@ struct LoadedModule {
 // the HLE modules; the loader adds logging stubs for anything still missing.
 void set_bound_imports(std::set<std::pair<std::string, std::uint32_t>> bound);
 
+// Import stubs of the main executable that no generated import wrapper covers
+// (no corpus yet, or a partial one) get the loaded modules' trampolines, so an
+// interpreted executable still reaches the HLE. Returns how many were bound.
+std::size_t bind_unwrapped_import_stubs(Runtime &runtime, const std::vector<psprecomp::PspImport> &imports);
+
 // True when an image with this module name is left to the HLE instead of being
 // loaded (Sony's libraries). MGA_LOAD_ALL_MODULES=1 loads every plain ELF.
 [[nodiscard]] bool module_is_hle(const std::string &module_name);

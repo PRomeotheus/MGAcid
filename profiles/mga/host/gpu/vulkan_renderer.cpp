@@ -719,6 +719,11 @@ struct VulkanRenderer::Impl {
         std::array<VkDescriptorSet, 2> copy_descriptors{};
         std::uint64_t copy_serial{};
         bool copy_valid{};
+        // The largest scissor rectangle drawn with (exclusive corner): a target
+        // smaller than the screen, such as a 128x64 blur buffer, occupies only
+        // that much guest memory, so a read-back must not write past it.
+        std::uint32_t extent_x{};
+        std::uint32_t extent_y{};
     };
     std::map<std::uint32_t, Target> targets;
     // Write-back of the displayed framebuffer to guest VRAM (write_back_frame):
@@ -735,6 +740,8 @@ struct VulkanRenderer::Impl {
         std::uint32_t address{};
         std::uint32_t stride{};
         std::uint32_t format{};
+        std::uint32_t width{kPspWidth};    // pixels per row that belong to the target
+        std::uint32_t height{kPspHeight};
     };
     WritebackFrame writeback_recorded{};  // copied by the frame in flight
     bool writeback_in_flight{};
@@ -1046,6 +1053,8 @@ struct VulkanRenderer::Impl {
         std::uint32_t x{};
         std::uint32_t y{};
     };
+    // True for a palette texture whose pixels lie in a render target drawn on the GPU.
+    [[nodiscard]] bool clut_texture_reads_target(const TextureState &texture) const;
     [[nodiscard]] FramebufferTexture find_framebuffer_texture(const GuestMemory &memory,
                                                               const TextureState &texture);
     VkDescriptorSet framebuffer_descriptor(Target &target, bool opaque);
@@ -2639,7 +2648,9 @@ void VulkanRenderer::Impl::record_writeback(std::uint32_t address) {
     const auto found = targets.find(address);
     if (found == targets.end() || (GuestMemory::canonical(address) & 0x1F000000u) != 0x04000000u) return;
     Target &target = found->second;
-    if (!target.initialized || target.guest_words.empty() || target.stride < kPspWidth) return;
+    // A target narrower than the screen (a 128-pixel blur buffer) is written
+    // back as far as it reaches; see WritebackFrame::width.
+    if (!target.initialized || target.guest_words.empty() || target.stride == 0u) return;
     if (writeback_image == VK_NULL_HANDLE) {
         std::string error;
         if (!create_writeback(error)) {
@@ -2668,7 +2679,9 @@ void VulkanRenderer::Impl::record_writeback(std::uint32_t address) {
                            1u, &copy);
     transition(command_buffer, target.color, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-    writeback_recorded = {address, target.stride, target.format};
+    writeback_recorded = {address, target.stride, target.format,
+                          std::min({target.extent_x != 0u ? target.extent_x : kPspWidth, target.stride, kPspWidth}),
+                          target.extent_y != 0u ? std::min(target.extent_y, kPspHeight) : kPspHeight};
     writeback_in_flight = true;
 }
 
@@ -2687,6 +2700,20 @@ void VulkanRenderer::Impl::snapshot_guest_words(const GuestMemory &memory, std::
 // and guest memory under the texture unchanged since the target was last drawn
 // to. Anything else (a palette or swizzled view of a framebuffer, or a texture
 // the game has since put where a framebuffer was) is decoded from guest memory.
+bool VulkanRenderer::Impl::clut_texture_reads_target(const TextureState &texture) const {
+    const bool clut = texture.format == TextureFormat::Clut4 || texture.format == TextureFormat::Clut8 ||
+                      texture.format == TextureFormat::Clut16 || texture.format == TextureFormat::Clut32;
+    if (!clut || texture.swizzled) return false;
+    const std::uint32_t texture_address = GuestMemory::canonical(texture.address);
+    for (const auto &[address, target] : targets) {
+        if (!target.initialized || target.guest_words.empty()) continue;
+        const std::uint32_t base = GuestMemory::canonical(address);
+        const std::uint32_t bytes = target.stride * kPspHeight * framebuffer_bytes_per_pixel(target.format);
+        if (texture_address >= base && texture_address - base < bytes) return true;
+    }
+    return false;
+}
+
 VulkanRenderer::Impl::FramebufferTexture VulkanRenderer::Impl::find_framebuffer_texture(
     const GuestMemory &memory, const TextureState &texture) {
     if (texture.swizzled || static_cast<std::uint32_t>(texture.format) > 3u || texture.width == 0u ||
@@ -3599,6 +3626,26 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
         }
     }
 
+    // MGA_SKIP_TEXTURES=0x9914530,0x8C3ACB0: drop every draw that samples one
+    // of these textures, to find which draw puts something on the screen.
+    static const std::vector<std::uint32_t> skipped_textures = [] {
+        std::vector<std::uint32_t> list;
+        if (const char *text = std::getenv("MGA_SKIP_TEXTURES")) {
+            for (const char *at = text; *at != '\0';) {
+                char *end = nullptr;
+                list.push_back(static_cast<std::uint32_t>(std::strtoul(at, &end, 16)));
+                if (end == at) break;
+                at = *end == ',' ? end + 1 : end;
+            }
+        }
+        return list;
+    }();
+    if (call.texture.enabled && !skipped_textures.empty() &&
+        std::find(skipped_textures.begin(), skipped_textures.end(), call.texture.address) != skipped_textures.end()) {
+        impl.scratch.clear();
+        return;
+    }
+
     static const bool trace = std::getenv("MGA_TRACE_GE") != nullptr;
     if (trace && impl.draws < 400u) {
         const GpuVertex &first = impl.scratch.front();
@@ -3648,8 +3695,13 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
                       << call.texture.height << " fmt=" << static_cast<int>(call.texture.format)
                       << " filter=" << call.texture.min_filter << "/" << call.texture.mag_filter
                       << " wrap=" << call.texture.wrap_s << "/" << call.texture.wrap_t
-                      << " blend=" << (call.blend.enabled ? 1 : 0) << " color=0x" << std::hex << b.color << std::dec
-                      << "\n";
+                      << " blend=" << (call.blend.enabled ? 1 : 0) << " color=0x" << std::hex << b.color
+                      << " bw=" << std::dec << call.texture.buffer_width << " clut=0x" << std::hex
+                      << call.texture.clut_address << "/" << call.texture.clut_format << " shift=" << std::dec
+                      << call.texture.clut_shift << " mask=0x" << std::hex << call.texture.clut_mask << " off="
+                      << call.texture.clut_offset << " -> target 0x" << call.target.color_address << std::dec
+                      << " stride " << call.target.color_stride << " fmt " << call.target.color_format << " scissor "
+                      << call.viewport.scissor_x2 << "x" << call.viewport.scissor_y2 << "\n";
         }
     }
 
@@ -3980,6 +4032,39 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     // target: the pixels never reach guest memory, which holds whatever was
     // there before. MGA_NO_FB_TEXTURES decodes guest memory as before.
     static const bool no_fb_textures = std::getenv("MGA_NO_FB_TEXTURES") != nullptr;
+    // A palette (CLUT) texture over a render target reads the target's pixels
+    // as indices: The 3rd Birthday's glow samples its 32-bit frame as CLUT32
+    // and its 16-bit blur target as CLUT16, so each channel goes through a
+    // lookup table. The indices are the target's packed pixels, so the target
+    // is read back into guest memory first and decoded like any other CLUT
+    // texture. MGA_NO_CLUT_READBACK decodes the stale memory instead.
+    static const bool no_clut_readback = std::getenv("MGA_NO_CLUT_READBACK") != nullptr;
+    if (!no_fb_textures && !no_clut_readback && call.texture.enabled && !call.clear_mode &&
+        impl.clut_texture_reads_target(call.texture)) {
+        // The guest memory behind a const reference is the emulator's own RAM;
+        // writing the target back into it is what the PSP's shared VRAM gives
+        // the game for free.
+        read_back_framebuffer(call.texture.address, const_cast<GuestMemory &>(memory));
+        std::erase_if(impl.list_texture_keys,
+                      [&](const auto &entry) { return entry.first.address == call.texture.address; });
+        // MGA_DUMP_CLUT_READBACK=N: the raw texture bytes each such draw reads in frame N.
+        static const std::uint64_t dump_frame = [] {
+            const char *text = std::getenv("MGA_DUMP_CLUT_READBACK");
+            return text != nullptr ? std::strtoull(text, nullptr, 10) : ~0ull;
+        }();
+        if (impl.frames == dump_frame) {
+            static std::uint32_t dumped = 0u;
+            const std::uint32_t bits = call.texture.format == TextureFormat::Clut32 ? 32u
+                                       : call.texture.format == TextureFormat::Clut16 ? 16u
+                                       : call.texture.format == TextureFormat::Clut8  ? 8u
+                                                                                      : 4u;
+            const std::size_t bytes = static_cast<std::size_t>(call.texture.buffer_width) * call.texture.height * bits / 8u;
+            if (const std::uint8_t *data = memory.raw_pointer(call.texture.address, bytes)) {
+                std::ofstream out("clut_readback_" + std::to_string(dumped++) + ".raw", std::ios::binary);
+                out.write(reinterpret_cast<const char *>(data), static_cast<std::streamsize>(bytes));
+            }
+        }
+    }
     VkDescriptorSet texture_descriptor = impl.white_texture.descriptor;
     if (call.texture.enabled && !call.clear_mode) {
         const Impl::FramebufferTexture source =
@@ -4016,6 +4101,9 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
             drawn.stride != call.target.color_stride || drawn.format != call.target.color_format;
         drawn.stride = call.target.color_stride;
         drawn.format = call.target.color_format;
+        if (layout_changed) drawn.extent_x = drawn.extent_y = 0u;
+        drawn.extent_x = std::max(drawn.extent_x, std::min<std::uint32_t>(call.viewport.scissor_x2 + 1u, kPspWidth));
+        drawn.extent_y = std::max(drawn.extent_y, std::min<std::uint32_t>(call.viewport.scissor_y2 + 1u, kPspHeight));
         if (layout_changed || drawn.guest_words.empty() || drawn.last_drawn_frame != impl.frames)
             impl.snapshot_guest_words(memory, call.target.color_address, drawn);
         drawn.last_drawn_frame = impl.frames;
@@ -4240,17 +4328,19 @@ void VulkanRenderer::Impl::store_frame(GuestMemory &memory, const WritebackFrame
                                        const std::uint32_t *pixels) {
     Impl &impl = *this;
     const std::uint32_t bytes_per_pixel = framebuffer_bytes_per_pixel(frame.format);
-    const std::size_t bytes = static_cast<std::size_t>(frame.stride) * kPspHeight * bytes_per_pixel;
+    const std::uint32_t width = std::min({frame.width, frame.stride, kPspWidth});
+    const std::uint32_t height = std::min(frame.height, kPspHeight);
+    const std::size_t bytes = static_cast<std::size_t>(frame.stride) * height * bytes_per_pixel;
     std::uint8_t *out = memory.raw_pointer(frame.address, bytes);
     if (out == nullptr) return;
-    for (std::uint32_t y = 0; y < kPspHeight; ++y) {
+    for (std::uint32_t y = 0; y < height; ++y) {
         const std::uint32_t *row = pixels + static_cast<std::size_t>(y) * kPspWidth;
         std::uint8_t *line = out + static_cast<std::size_t>(y) * frame.stride * bytes_per_pixel;
         if (frame.format == 3u) {
-            std::memcpy(line, row, static_cast<std::size_t>(kPspWidth) * 4u);
+            std::memcpy(line, row, static_cast<std::size_t>(width) * 4u);
             continue;
         }
-        for (std::uint32_t x = 0; x < kPspWidth; ++x) {
+        for (std::uint32_t x = 0; x < width; ++x) {
             // Red in the low bits, as texture_decode's expand_* read them.
             const std::uint32_t pixel = row[x];
             const std::uint32_t r = pixel & 0xFFu;

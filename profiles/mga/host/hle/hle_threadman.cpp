@@ -151,7 +151,10 @@ void register_semaphores(HleRegistrar &hle) {
             return;
         }
         const SceUID uid = kernel().allocate_uid();
-        kernel().semaphores[uid] = Semaphore{read_cstring(rt.memory(), arg(ctx, 0), 32u), arg(ctx, 1), initial, maximum, {}};
+        kernel().semaphores[uid] = Semaphore{read_cstring(rt.memory(), arg(ctx, 0), 32u), arg(ctx, 1), initial, maximum, {}, initial};
+        if (trace_sync())
+            log_sync("CreateSema " + std::to_string(uid) + " " + kernel().semaphores[uid].name + " init=" +
+                     std::to_string(initial) + " max=" + std::to_string(maximum) + " ra=" + psprecomp::hex32(ctx.gpr[31]));
         kernel().finish(ctx, as_unsigned(uid));
     });
     hle.add("ThreadManForUser", "sceKernelDeleteSema", [](Runtime &, AllegrexContext &ctx) {
@@ -177,10 +180,42 @@ void register_semaphores(HleRegistrar &hle) {
             return;
         }
         found->second.count += signal;
+        if (trace_sync())
+            log_sync("SignalSema " + std::to_string(uid) + " +" + std::to_string(signal) + " -> " +
+                     std::to_string(found->second.count) + " ra=" + psprecomp::hex32(ctx.gpr[31]));
         kernel().release_semaphore_waiters(uid);
         kernel().finish(ctx, 0u);
     });
     hle.add("ThreadManForUser", "sceKernelWaitSema", [](Runtime &, AllegrexContext &ctx) {
+        const SceUID uid = as_signed(arg(ctx, 0));
+        auto found = kernel().semaphores.find(uid);
+        const auto wanted = as_signed(arg(ctx, 1));
+        if (found == kernel().semaphores.end()) {
+            kernel().finish(ctx, error::kUnknownSemid);
+            return;
+        }
+        if (wanted <= 0 || wanted > found->second.max_count) {
+            kernel().finish(ctx, error::kIllegalCount);
+            return;
+        }
+        Semaphore &sema = found->second;
+        if (trace_sync())
+            log_sync("WaitSema " + std::to_string(uid) + " want=" + std::to_string(wanted) + " count=" +
+                     std::to_string(sema.count) + " ra=" + psprecomp::hex32(ctx.gpr[31]));
+        if (sema.waiters.empty() && sema.count >= wanted) {
+            sema.count -= wanted;
+            kernel().finish(ctx, 0u);
+            return;
+        }
+        sema.waiters.push_back(kernel().current_uid());
+        WaitState wait{};
+        wait.type = WaitType::Semaphore;
+        wait.object = uid;
+        wait.value = static_cast<std::uint32_t>(wanted);
+        wait.timeout_address = arg(ctx, 2);
+        kernel().block(ctx, wait, 0u);
+    });
+    hle.add("ThreadManForUser", "sceKernelWaitSemaCB", [](Runtime &, AllegrexContext &ctx) {
         const SceUID uid = as_signed(arg(ctx, 0));
         auto found = kernel().semaphores.find(uid);
         const auto wanted = as_signed(arg(ctx, 1));
@@ -198,6 +233,7 @@ void register_semaphores(HleRegistrar &hle) {
             kernel().finish(ctx, 0u);
             return;
         }
+        (void)kernel().deliver_callbacks();
         sema.waiters.push_back(kernel().current_uid());
         WaitState wait{};
         wait.type = WaitType::Semaphore;

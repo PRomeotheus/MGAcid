@@ -102,6 +102,8 @@ void install_profile(Runtime &runtime, const psprecomp::Elf32Image &elf, const P
     // replace the stubs above (kjfs, sound and zlibdec are imported by the
     // executable but loaded by it at run time).
     set_bound_imports(std::move(bound));
+    if (const std::size_t unwrapped = bind_unwrapped_import_stubs(runtime, imports); unwrapped != 0u)
+        std::cout << "HLE imports: " << unwrapped << " stubs bound to trampolines (no generated wrapper)\n";
     std::cout << "HLE imports: " << imports.size() << " total, " << hle.count() << " implemented, " << stubbed
               << " logging stubs" << (strict ? " (strict mode)" : "") << "\n";
 

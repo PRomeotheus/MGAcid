@@ -128,6 +128,23 @@ void ensure_import_bound(Runtime &runtime, const std::string &library, std::uint
     s.bound.insert(key);
 }
 
+} // namespace
+
+std::size_t bind_unwrapped_import_stubs(Runtime &runtime, const std::vector<psprecomp::PspImport> &imports) {
+    std::size_t bound = 0u;
+    for (const psprecomp::PspImport &import : imports) {
+        if (runtime.has_function(import.stub_address)) continue;
+        const auto slot = trampoline_for(import.stub_address, import.library, import.nid);
+        if (!slot) throw psprecomp::Error("Too many import stubs for the trampoline pool");
+        runtime.register_function(import.stub_address, trampolines()[*slot],
+                                  import.library + "::" + psprecomp::hex32(import.nid));
+        ++bound;
+    }
+    return bound;
+}
+
+namespace {
+
 // An export satisfies an import by jumping to it: the import wrapper sees a
 // new pc and leaves $ra alone, so the export returns straight to the caller.
 void link_export(Runtime &runtime, const ModuleExport &entry, const std::string &module_name) {

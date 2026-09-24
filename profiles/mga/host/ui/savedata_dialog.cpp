@@ -73,12 +73,42 @@ bool back_pressed() {
     return escape || ImGui::IsKeyPressed(cancel, false);
 }
 
+// The separator between the parts of a row. ASCII on purpose: the build hands
+// MSVC no /utf-8, so its execution charset is the system code page and a
+// non-ASCII escape in a narrow literal comes out as one byte that is not valid
+// UTF-8 -- which ImGui draws as a replacement character.
+constexpr const char *kSeparator = "  -  ";
+
+// The PSP's savedata title and detail are free text the game fills in, and
+// Metal Gear Ac!d puts the difficulty and the play time on separate lines. A
+// row is one line, so the lines are joined rather than clipped.
+std::string flatten(const std::string &text) {
+    std::string out;
+    std::string line;
+    const auto flush = [&] {
+        const auto first = line.find_first_not_of(" \t");
+        if (first != std::string::npos) {
+            const auto last = line.find_last_not_of(" \t");
+            if (!out.empty()) out += kSeparator;
+            out.append(line, first, last - first + 1);
+        }
+        line.clear();
+    };
+    for (const char c : text) {
+        if (c == '\n' || c == '\r') flush();
+        else line += c;
+    }
+    flush();
+    return out;
+}
+
 // What a slot shows: its own title, and the detail that tells two saves of the
 // same game apart.
 std::string slot_name(const SaveSlot &slot, SavedataAction action) {
     if (!slot.exists) return action == SavedataAction::Save ? "New save" : "Empty";
-    std::string name = slot.title.empty() ? "Save " + slot.save_name : slot.title;
-    if (!slot.detail.empty() && slot.detail != name) name += "  \u00b7  " + slot.detail;
+    std::string name = flatten(slot.title.empty() ? "Save " + slot.save_name : slot.title);
+    const std::string detail = flatten(slot.detail);
+    if (!detail.empty() && detail != name) name += kSeparator + detail;
     return name;
 }
 

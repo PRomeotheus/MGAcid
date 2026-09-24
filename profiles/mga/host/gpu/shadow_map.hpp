@@ -109,7 +109,22 @@ public:
     // pass needs the matrix while it draws. Returns false when there is no
     // usable light or nothing was seen last frame, and shading should then skip
     // the map entirely.
-    [[nodiscard]] bool resolve_light(const LightingState &lighting);
+    // `draw_to_clip` is the renderer's projection times view -- what takes a
+    // pre-transformed vertex to clip space -- and `world_to_clip` is the
+    // equivalent matrix the game keeps for itself. Both land in the same clip
+    // space, so one composed with the inverse of the other is the transform
+    // from world space into the space the display list is drawn in. That is
+    // what lets a sun stay where it is put while the camera turns; without it
+    // the only light available is one fixed in a space that turns with the
+    // camera, and its shadows swing with it.
+    //
+    // Pass have_world_matrix false when there is no scene to read one from,
+    // and the game's own light is used instead.
+    [[nodiscard]] bool resolve_light(const LightingState &lighting, const std::array<float, 16> &draw_to_clip,
+                                     const std::array<float, 16> &world_to_clip, bool have_world_matrix);
+    // Whether the light in use is fixed in the world, or only in draw space.
+    // False means shadows will swing as the camera turns, and the trace says so.
+    [[nodiscard]] bool light_is_world_fixed() const noexcept { return world_fixed_; }
 
     // The matrix the shading pass must use, matching what record() draws with.
     // Column-major, as the GE's matrices are.
@@ -160,6 +175,7 @@ private:
     std::array<float, 3> previous_maximum_{};
     bool previous_valid_{};
     std::array<float, 3> light_direction_{};
+    bool world_fixed_{};
 };
 
 } // namespace mga::gpu

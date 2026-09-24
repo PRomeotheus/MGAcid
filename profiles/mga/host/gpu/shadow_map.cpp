@@ -84,6 +84,38 @@ constexpr VkFormat kDepthFormat = VK_FORMAT_D32_SFLOAT;
     return m;
 }
 
+// Where a shadow should come from when the game will not say. Slightly off
+// vertical and off to one side, because a sun directly overhead puts a
+// character's shadow entirely under their own feet, where it cannot be seen.
+constexpr std::array<float, 3> kSunDirection{0.35f, 1.0f, 0.28f};
+
+// Cofactor expansion. Returns false on a singular matrix rather than dividing
+// by zero -- a light left where it was is recoverable, a NaN one is not.
+[[nodiscard]] bool invert(const std::array<float, 16> &m, std::array<float, 16> &out) {
+    std::array<float, 16> inv{};
+    inv[0]  =  m[5]*m[10]*m[15] - m[5]*m[11]*m[14] - m[9]*m[6]*m[15] + m[9]*m[7]*m[14] + m[13]*m[6]*m[11] - m[13]*m[7]*m[10];
+    inv[4]  = -m[4]*m[10]*m[15] + m[4]*m[11]*m[14] + m[8]*m[6]*m[15] - m[8]*m[7]*m[14] - m[12]*m[6]*m[11] + m[12]*m[7]*m[10];
+    inv[8]  =  m[4]*m[9]*m[15]  - m[4]*m[11]*m[13] - m[8]*m[5]*m[15] + m[8]*m[7]*m[13] + m[12]*m[5]*m[11] - m[12]*m[7]*m[9];
+    inv[12] = -m[4]*m[9]*m[14]  + m[4]*m[10]*m[13] + m[8]*m[5]*m[14] - m[8]*m[6]*m[13] - m[12]*m[5]*m[10] + m[12]*m[6]*m[9];
+    inv[1]  = -m[1]*m[10]*m[15] + m[1]*m[11]*m[14] + m[9]*m[2]*m[15] - m[9]*m[3]*m[14] - m[13]*m[2]*m[11] + m[13]*m[3]*m[10];
+    inv[5]  =  m[0]*m[10]*m[15] - m[0]*m[11]*m[14] - m[8]*m[2]*m[15] + m[8]*m[3]*m[14] + m[12]*m[2]*m[11] - m[12]*m[3]*m[10];
+    inv[9]  = -m[0]*m[9]*m[15]  + m[0]*m[11]*m[13] + m[8]*m[1]*m[15] - m[8]*m[3]*m[13] - m[12]*m[1]*m[11] + m[12]*m[3]*m[9];
+    inv[13] =  m[0]*m[9]*m[14]  - m[0]*m[10]*m[13] - m[8]*m[1]*m[14] + m[8]*m[2]*m[13] + m[12]*m[1]*m[10] - m[12]*m[2]*m[9];
+    inv[2]  =  m[1]*m[6]*m[15]  - m[1]*m[7]*m[14]  - m[5]*m[2]*m[15] + m[5]*m[3]*m[14] + m[13]*m[2]*m[7]  - m[13]*m[3]*m[6];
+    inv[6]  = -m[0]*m[6]*m[15]  + m[0]*m[7]*m[14]  + m[4]*m[2]*m[15] - m[4]*m[3]*m[14] - m[12]*m[2]*m[7]  + m[12]*m[3]*m[6];
+    inv[10] =  m[0]*m[5]*m[15]  - m[0]*m[7]*m[13]  - m[4]*m[1]*m[15] + m[4]*m[3]*m[13] + m[12]*m[1]*m[7]  - m[12]*m[3]*m[5];
+    inv[14] = -m[0]*m[5]*m[14]  + m[0]*m[6]*m[13]  + m[4]*m[1]*m[14] - m[4]*m[2]*m[13] - m[12]*m[1]*m[6]  + m[12]*m[2]*m[5];
+    inv[3]  = -m[1]*m[6]*m[11]  + m[1]*m[7]*m[10]  + m[5]*m[2]*m[11] - m[5]*m[3]*m[10] - m[9]*m[2]*m[7]   + m[9]*m[3]*m[6];
+    inv[7]  =  m[0]*m[6]*m[11]  - m[0]*m[7]*m[10]  - m[4]*m[2]*m[11] + m[4]*m[3]*m[10] + m[8]*m[2]*m[7]   - m[8]*m[3]*m[6];
+    inv[11] = -m[0]*m[5]*m[11]  + m[0]*m[7]*m[9]   + m[4]*m[1]*m[11] - m[4]*m[3]*m[9]  - m[8]*m[1]*m[7]   + m[8]*m[3]*m[5];
+    inv[15] =  m[0]*m[5]*m[10]  - m[0]*m[6]*m[9]   - m[4]*m[1]*m[10] + m[4]*m[2]*m[9]  + m[8]*m[1]*m[6]   - m[8]*m[2]*m[5];
+    const float determinant = m[0]*inv[0] + m[1]*inv[4] + m[2]*inv[8] + m[3]*inv[12];
+    if (!std::isfinite(determinant) || std::abs(determinant) < 1e-20f) return false;
+    const float scale = 1.0f / determinant;
+    for (std::size_t i = 0; i < inv.size(); ++i) out[i] = inv[i] * scale;
+    return true;
+}
+
 [[nodiscard]] std::array<float, 16> multiply(const std::array<float, 16> &a, const std::array<float, 16> &b) {
     std::array<float, 16> result{};
     for (std::uint32_t column = 0; column < 4u; ++column)
@@ -379,7 +411,8 @@ void ShadowMap::add_casters(const float *positions, std::size_t vertex_count, st
     }
 }
 
-bool ShadowMap::resolve_light(const LightingState &lighting) {
+bool ShadowMap::resolve_light(const LightingState &lighting, const std::array<float, 16> &draw_to_clip,
+                             const std::array<float, 16> &world_to_clip, bool have_world_matrix) {
     // Nothing cast last frame, so there is no box to build and nothing worth
     // casting into it. The first frame of a scene has no shadows.
     if (!previous_valid_) return false;
@@ -412,10 +445,51 @@ bool ShadowMap::resolve_light(const LightingState &lighting) {
     const std::array<float, 3> centre{(previous_minimum_[0] + previous_maximum_[0]) * 0.5f,
                                       (previous_minimum_[1] + previous_maximum_[1]) * 0.5f,
                                       (previous_minimum_[2] + previous_maximum_[2]) * 0.5f};
-    std::array<float, 3> to_light{0.35f, 1.0f, 0.25f};
-    if (have_light) {
-        to_light = {light.position[0], light.position[1], light.position[2]};
-        if (light.type != 0) to_light = {to_light[0] - centre[0], to_light[1] - centre[1], to_light[2] - centre[2]};
+    // A sun of the port's own, placed in the world and kept there.
+    //
+    // The game's light is not usable as a shadow source. Whatever space it is
+    // given in turns with the camera, so a shadow cast from it swings round as
+    // the view moves -- which reads as wrong immediately, because a shadow that
+    // follows your head is the one thing a real shadow never does. Recovering
+    // world space costs one matrix inverse, and buys a shadow that stays put.
+    //
+    // MGA_SHADOW_GAME_LIGHT uses the game's light anyway, for comparison.
+    static const bool prefer_game_light = std::getenv("MGA_SHADOW_GAME_LIGHT") != nullptr;
+    std::array<float, 3> to_light{};
+    world_fixed_ = false;
+    std::array<float, 16> draw_to_clip_inverse{};
+    if (have_world_matrix && !prefer_game_light && invert(draw_to_clip, draw_to_clip_inverse)) {
+        // Both matrices land in the same clip space, so this is world to draw.
+        const std::array<float, 16> world_to_draw = multiply(draw_to_clip_inverse, world_to_clip);
+        // Only the rotation matters for a direction, and only a rotation is
+        // believable: if the recovered matrix is not one, the two matrices did
+        // not agree and the result would point somewhere arbitrary.
+        const auto column = [&](std::size_t c) {
+            return std::array<float, 3>{world_to_draw[c * 4u], world_to_draw[c * 4u + 1u], world_to_draw[c * 4u + 2u]};
+        };
+        bool rotation = true;
+        for (std::size_t c = 0; c < 3u; ++c) {
+            const std::array<float, 3> axis = column(c);
+            const float length_squared = dot(axis, axis);
+            if (!std::isfinite(length_squared) || std::abs(length_squared - 1.0f) > 0.05f) rotation = false;
+        }
+        if (rotation) {
+            const std::array<float, 3> x = column(0), y = column(1), z = column(2);
+            to_light = {x[0] * kSunDirection[0] + y[0] * kSunDirection[1] + z[0] * kSunDirection[2],
+                        x[1] * kSunDirection[0] + y[1] * kSunDirection[1] + z[1] * kSunDirection[2],
+                        x[2] * kSunDirection[0] + y[2] * kSunDirection[1] + z[2] * kSunDirection[2]};
+            world_fixed_ = true;
+        }
+    }
+    if (!world_fixed_) {
+        // No world matrix, or it did not survive the check. Fall back to the
+        // game's light, or to something overhead when it has none.
+        to_light = {0.35f, 1.0f, 0.25f};
+        if (have_light) {
+            to_light = {light.position[0], light.position[1], light.position[2]};
+            if (light.type != 0)
+                to_light = {to_light[0] - centre[0], to_light[1] - centre[1], to_light[2] - centre[2]};
+        }
     }
     to_light = normalise(to_light);
     // A light pointing along nothing, or from directly below the floor, would

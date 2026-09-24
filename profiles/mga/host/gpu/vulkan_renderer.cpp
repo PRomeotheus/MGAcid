@@ -3790,15 +3790,19 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
             if (identity) ++impl.shadow_trace.identity;
             if (lit && identity) ++impl.shadow_trace.identity_lit;
         }
-        // Everything the scene draws casts. Restricting this to the
-        // characters meant relying on spotting them by their identity world
-        // matrix, and if that test is ever wrong there are simply no casters
-        // and no shadows, with nothing to show why. Casting from all of it
-        // cannot fail that way, and it gets the scenery shadowing the floor as
-        // a bonus. MGA_SHADOW_CHARACTERS_ONLY goes back to the narrow test.
-        static const bool characters_only = std::getenv("MGA_SHADOW_CHARACTERS_ONLY") != nullptr;
+        // Only the characters cast. They are the pre-transformed draws, which
+        // an identity world matrix identifies.
+        //
+        // Everything used to cast, on the reasoning that a narrow test which
+        // was ever wrong would leave no casters and no shadows with nothing to
+        // show why. It is wider than it needs to be: the game's 3D map markers
+        // -- the objective arrow, the target sphere -- are ordinary
+        // transformed draws, so they cast too, and a marker hovering over the
+        // floor drops a shadow onto it that belongs to no object in the world.
+        // MGA_SHADOW_EVERYTHING_CASTS restores the wide behaviour.
+        static const bool everything_casts = std::getenv("MGA_SHADOW_EVERYTHING_CASTS") != nullptr;
         if (impl.shadow_available && impl.shadow_map != nullptr && impl.shadow_strength > 0.0f &&
-            !impl.scratch.empty() && !call.clear_mode && (!characters_only || is_identity(call.world))) {
+            !impl.scratch.empty() && !call.clear_mode && (everything_casts || is_identity(call.world))) {
             impl.shadow_map->add_casters(&impl.scratch[0].x, impl.scratch.size(),
                                         sizeof(GpuVertex) / sizeof(float), call.world);
             impl.shadow_trace.casters = static_cast<std::uint32_t>(impl.shadow_map->captured());
@@ -3876,7 +3880,13 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
         impl.shadow_strength > 0.0f && impl.shadow_light < 0) {
         impl.last_lighting = call.lighting;
         impl.last_lighting_valid = true;
-        impl.shadow_trace.resolved = impl.shadow_map->resolve_light(call.lighting);
+        // The renderer's projection times view takes a pre-transformed vertex
+        // to clip space; the game's own matrix takes a world position to the
+        // same place. Handing both over is what lets the sun be placed in the
+        // world instead of in a space that turns with the camera.
+        impl.shadow_trace.resolved =
+            impl.shadow_map->resolve_light(call.lighting, multiply(call.projection, call.view),
+                                           impl.shadow_transform, impl.shadow_transform_valid);
         if (impl.shadow_trace.resolved) {
             impl.shadow_light_transform = impl.shadow_map->transform();
             impl.shadow_light = impl.shadow_map->light_index();
@@ -4545,7 +4555,8 @@ void VulkanRenderer::present(std::uint32_t display_address) {
                       << " strength=" << std::fixed << std::setprecision(2) << impl.shadow_strength
                       << " | transformed=" << s.transformed << " lit=" << s.lit << " identity=" << s.identity
                       << " both=" << s.identity_lit << " casterverts=" << s.casters
-                      << " | resolved=" << (s.resolved ? 1 : 0) << " light=" << impl.shadow_light;
+                      << " | resolved=" << (s.resolved ? 1 : 0) << " light=" << impl.shadow_light
+                      << " worldfixed=" << (impl.shadow_map != nullptr && impl.shadow_map->light_is_world_fixed() ? 1 : 0);
             if (impl.shadow_light >= 0 && impl.last_lighting_valid) {
                 const LightState &light = impl.last_lighting.lights[static_cast<std::size_t>(impl.shadow_light)];
                 std::cout << " type=" << light.type << " diffuse=" << psprecomp_hex(light.diffuse);

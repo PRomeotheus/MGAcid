@@ -34,6 +34,7 @@ struct Settings {
     bool smooth_textures{};            // mipmaps and anisotropic filtering, which the PSP had no room for
     std::uint32_t texture_scale{1u};   // 1 is off; 2/3/4 upscale decoded textures before they are uploaded
     bool texture_scale_sharp{true};    // edge-preserving rather than plain bicubic, for art drawn texel by texel
+    bool texture_pack{true};           // use replacement textures from <data>/textures when there are any
     bool smart_2d{true};               // sample pixel-mapped 2D sharp, whatever the 3D filter is
     bool post_process{};               // show the frame through a shader pass rather than a plain blit
     bool fxaa{};                       // anti-alias the finished frame; needs post_process

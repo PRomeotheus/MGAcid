@@ -2,8 +2,10 @@
 
 #include "shadow_map.hpp"
 #include "texture_decode.hpp"
+#include "texture_pack.hpp"
 #include "texture_scale.hpp"
 
+#include "install/user_data.hpp"
 #include "perf/frame_stats.hpp"
 #include "perf/perf_overlay.hpp"
 #include "settings/settings.hpp"
@@ -535,6 +537,10 @@ struct VulkanRenderer::Impl {
     // distance, which shimmers badly once the internal resolution is raised
     // above the 480x272 that hid it.
     bool smooth_textures{};
+    // Replacement textures from a pack, and the dumps that let someone make
+    // them; see gpu/texture_pack.hpp.
+    TexturePack texture_pack;
+    bool texture_pack_enabled{};
     // Decoded textures are upscaled by this factor before upload, so they
     // still have detail to give at high internal resolution.
     std::uint32_t texture_scale{1u};
@@ -1075,6 +1081,17 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
     impl.post_ao = std::clamp(player.contact_shadows, 0.0f, 1.0f);
     impl.blob_strength = std::clamp(player.blob_shadows, 0.0f, 1.0f);
     impl.shadow_strength = std::clamp(player.shadow_maps, 0.0f, 1.0f);
+    impl.texture_pack_enabled = player.texture_pack;
+    try {
+        impl.texture_pack.open(install::user_data_directory());
+    } catch (const std::exception &e) {
+        std::cout << "[textures] cannot look for a texture pack: " << e.what() << "\n";
+    }
+    // Dumping is a developer's errand rather than a setting: it writes a file
+    // for every texture the game draws.
+    if (std::getenv("MGA_DUMP_TEXTURES") != nullptr) impl.texture_pack.set_dumping(true);
+    if (impl.texture_pack.available())
+        std::cout << "[textures] a texture pack is present\n";
     const std::uint32_t window_scale = std::clamp<std::uint32_t>(player.window_scale, 1u, settings::kMaxWindowScale);
 
     if (!SDL_Init(SDL_INIT_VIDEO)) {
@@ -2470,13 +2487,25 @@ VulkanRenderer::Impl::Texture &VulkanRenderer::Impl::texture_for(const GuestMemo
         destroy_texture(oldest->second);
         textures.erase(oldest);
     }
-    // Upscaling happens once per texture, behind the same cache as the decode,
-    // so a texture the game reuses every frame is paid for on its first use.
+    // All of this happens once per texture, behind the same cache as the
+    // decode, so a texture the game reuses every frame is paid for on its
+    // first use.
     std::uint32_t width = state.width;
     std::uint32_t height = state.height;
-    if (texture_scale > 1u)
+    // Dumped at the size the game drew it, which is what a replacement has to
+    // stand in for.
+    texture_pack.dump(key, width, height, pixels.data());
+    const PackedTexture *replacement = texture_pack_enabled ? texture_pack.find(key) : nullptr;
+    if (replacement != nullptr) {
+        // Someone has drawn this at a resolution of their choosing, so the
+        // renderer's own upscaling has no business enlarging it further.
+        pixels = replacement->pixels;
+        width = replacement->width;
+        height = replacement->height;
+    } else if (texture_scale > 1u) {
         (void)scale_texture(pixels, width, height, texture_scale,
                             texture_scale_sharp ? TextureScaleMode::Sharp : TextureScaleMode::Smooth);
+    }
     Texture texture = create_texture(width, height, pixels.data());
     if (texture.descriptor == VK_NULL_HANDLE) return white_texture;
     return textures.emplace(key, texture).first->second;
@@ -3175,6 +3204,25 @@ void VulkanRenderer::set_smart_2d(bool smart) {
     impl.smart_2d = smart;
     // Nothing cached depends on it: the decision is made per draw.
     std::cout << "[render] sharp 2D " << (smart ? "on" : "off") << "\n";
+}
+
+void VulkanRenderer::set_texture_pack(bool enabled) {
+    Impl &impl = *impl_;
+    if (!impl.ready || impl.recording || impl.texture_pack_enabled == enabled) return;
+    impl.texture_pack_enabled = enabled;
+    // A replacement is baked into the uploaded image, so the cache has to go --
+    // the same reason changing the scaling drops it.
+    vkDeviceWaitIdle(impl.device);
+    for (auto &[key, texture] : impl.textures) impl.destroy_texture(texture);
+    impl.textures.clear();
+    impl.list_texture_keys.clear();
+    std::cout << "[textures] texture pack " << (enabled ? "on" : "off");
+    if (enabled && !impl.texture_pack.available()) std::cout << " (none found)";
+    std::cout << "\n";
+}
+
+[[nodiscard]] bool VulkanRenderer::texture_pack_available() const noexcept {
+    return impl_ && impl_->texture_pack.available();
 }
 
 void VulkanRenderer::set_texture_scale(std::uint32_t factor, bool sharp) {

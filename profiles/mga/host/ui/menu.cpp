@@ -380,6 +380,20 @@ void Menu::video() {
             settings::save();
         }
     }
+    {
+        RowOptions o = options_for("video.texture_pack",
+                                   "Use replacement textures from the textures folder in the data directory, when "
+                                   "there are any. A replacement is used at whatever size it was drawn, and is not "
+                                   "enlarged again by the scaling above. Set MGA_DUMP_TEXTURES=1 to write out every "
+                                   "texture the game draws, ready to be repainted and dropped back in.");
+        const bool present = renderer().texture_pack_available();
+        if (!present) o.note = "none found";
+        if (toggle_row("Texture pack", s.texture_pack && present, o)) {
+            s.texture_pack = !s.texture_pack;
+            renderer().set_texture_pack(s.texture_pack);
+            settings::save();
+        }
+    }
     section("Timing");
     {
         struct Mode {

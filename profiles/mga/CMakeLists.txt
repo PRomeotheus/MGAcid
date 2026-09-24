@@ -101,6 +101,7 @@ set(MGA_HOST_SOURCES
     host/gpu/ge_state.cpp
     host/gpu/texture_decode.cpp
     host/gpu/shadow_map.cpp
+    host/gpu/texture_pack.cpp
     host/gpu/texture_scale.cpp
     host/perf/frame_stats.cpp
     host/perf/perf_overlay.cpp
@@ -324,6 +325,21 @@ endif()
 set_target_properties(mga_adhoc_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 if(PSPRECOMP_BUILD_TESTS)
     add_test(NAME mga_adhoc_tests COMMAND mga_adhoc_tests)
+endif()
+
+# Replacement textures: that a dump reads back exactly, and that every PNG
+# layout an image editor produces is understood. Needs the PNG codec, so it is
+# only built when FFmpeg is there to provide one.
+if(MGA_HAS_FFMPEG)
+    add_executable(mga_texture_pack_tests
+        tests/texture_pack_tests.cpp
+        host/gpu/texture_pack.cpp)
+    target_include_directories(mga_texture_pack_tests PRIVATE "${MGA_PROFILE_DIR}/host")
+    mga_use_ffmpeg(mga_texture_pack_tests)
+    set_target_properties(mga_texture_pack_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    if(PSPRECOMP_BUILD_TESTS)
+        add_test(NAME mga_texture_pack_tests COMMAND mga_texture_pack_tests)
+    endif()
 endif()
 
 # Chained AOT calls nest native frames; give the guest-executing main thread

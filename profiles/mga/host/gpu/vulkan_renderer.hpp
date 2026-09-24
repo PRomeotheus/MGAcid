@@ -112,6 +112,10 @@ public:
     void set_sharp_textures(bool sharp);
     void set_smooth_textures(bool smooth);
     void set_texture_scale(std::uint32_t factor, bool sharp);
+    // Use replacement textures from the pack in the data directory, when one is
+    // there. Does nothing without a pack.
+    void set_texture_pack(bool enabled);
+    [[nodiscard]] bool texture_pack_available() const noexcept;
     void set_smart_2d(bool smart);
     // Shows the frame through a shader pass instead of a blit, and turns
     // anti-aliasing on within it. Anti-aliasing does nothing on its own.

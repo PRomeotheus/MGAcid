@@ -29,6 +29,17 @@ struct PadState {
     std::uint8_t right_y{0x80u};
 };
 
+// Something that should cast a shadow on the ground: a character, in world
+// space. The renderer cannot work these out for itself -- Metal Gear Ac!d
+// skins its characters on the CPU and submits them pre-transformed with an
+// identity world matrix, all batched at the origin -- so the kernel reads them
+// out of the game's own records and hands them over once a frame.
+struct ShadowCaster {
+    std::array<float, 3> position{};  // world space
+    float ground{};                   // world height of the floor beneath it
+    float radius{};                   // how wide the shadow should be
+};
+
 struct RendererConfig {
     std::string title{"MGAcid"};
 };
@@ -100,6 +111,26 @@ public:
     void set_sharp_screen(bool sharp);
     void set_sharp_textures(bool sharp);
     void set_smooth_textures(bool smooth);
+    void set_texture_scale(std::uint32_t factor, bool sharp);
+    void set_smart_2d(bool smart);
+    // Shows the frame through a shader pass instead of a blit, and turns
+    // anti-aliasing on within it. Anti-aliasing does nothing on its own.
+    void set_post_processing(bool enabled, bool fxaa);
+    // Darkens the creases where geometry meets, read out of the depth
+    // buffer in the post pass. 0 turns it off. Needs post-processing.
+    void set_contact_shadows(float strength);
+    // Blob shadows under the characters. 0 turns them off. Unlike the effects
+    // above this does not need the post-processing pass: the blobs are drawn
+    // with the scene, so they sit under the geometry properly.
+    void set_blob_shadows(float strength);
+    // Shadows cast from the game's own lights, through a depth map rendered
+    // from where the brightest light stands. 0 turns them off.
+    void set_shadow_maps(float strength);
+    // The characters to put a blob under, in world space, and the matrix that
+    // takes world space to clip space -- the game's own, so the renderer needs
+    // no assumption about what space the display list is in. Call once a
+    // frame; the renderer keeps them until replaced.
+    void set_shadow_casters(const std::array<float, 16> &world_to_clip, const std::vector<ShadowCaster> &casters);
     void set_perf_overlay(bool visible);
 
     [[nodiscard]] SDL_Window *window() const noexcept;
@@ -138,6 +169,10 @@ public:
     [[nodiscard]] std::uint64_t draws_submitted() const noexcept;
 
 private:
+    // Draws a blob under each caster. Called from submit() at the moment the
+    // frame turns from 3D to the interface.
+    void draw_shadow_blobs(const GuestMemory &memory);
+
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

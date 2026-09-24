@@ -17,6 +17,14 @@ layout(location = 3) out float frag_fog;
 // (in_normal.z, in_position.w), which through-mode vertices do not use
 // otherwise; see clamp_through_quads() in vulkan_renderer.cpp.
 layout(location = 4) flat out vec4 frag_uv_rect;
+// Shadow mapping. frag_shadow_position is this vertex in the light's clip
+// space. frag_shadow_light says what to do where the light is blocked: on a lit
+// draw its rgb is the contribution to take away, and on an unlit one its w is
+// 1, because unlit geometry has its lighting baked into its colours and there
+// is no term to remove -- it can only be darkened. Through-mode draws get zero
+// and are never shadowed.
+layout(location = 5) out vec4 frag_shadow_position;
+layout(location = 6) out vec4 frag_shadow_light;
 
 layout(push_constant) uniform Push {
     mat4 transform;      // WVP, or identity for through vertices
@@ -40,6 +48,11 @@ layout(set = 1, binding = 0) uniform Environment {
     vec4 light_ambient[4];
     vec4 light_diffuse[4];
     vec4 light_specular[4];
+    // Draw space to the shadow light's clip space.
+    mat4 shadow_transform;
+    // x: strength, 0 when off; y: which light casts; z: one shadow map texel;
+    // w: depth bias.
+    vec4 shadow_params;
 } lighting;
 
 // A lit draw's world matrix and material; the layout matches ObjectBlock.
@@ -58,7 +71,7 @@ layout(set = 1, binding = 1) uniform Object {
 // the spot cone. The material update mask makes the vertex colour stand in for
 // the ambient (bit 0), diffuse (bit 1) and specular (bit 2) material colours;
 // a vertex without a colour keeps the material ones.
-void light_vertex(out vec4 color, out vec3 separate_specular) {
+void light_vertex(out vec4 color, out vec3 separate_specular, out vec3 shadow_light, out vec4 shadow_position) {
     int mask = int(object.flags.w + 0.5);
     bool has_color = object.flags.y > 0.5;
     vec4 ambient_material = (has_color && (mask & 1) != 0) ? in_color : object.material_ambient;
@@ -76,6 +89,13 @@ void light_vertex(out vec4 color, out vec3 separate_specular) {
 
     vec3 sum = object.emissive.rgb + lighting.ambient.rgb * ambient_material.rgb;
     vec3 specular = vec3(0.0);
+    // Where this vertex falls in the light's map, in the same halved-z
+    // convention the shadow pass rasterised with.
+    vec4 light_clip = lighting.shadow_transform * vec4(world_position, 1.0);
+    light_clip.z = (light_clip.z + light_clip.w) * 0.5;
+    shadow_position = light_clip;
+    shadow_light = vec3(0.0);
+    int shadow_index = lighting.shadow_params.x > 0.0 ? int(lighting.shadow_params.y + 0.5) : -1;
     for (int i = 0; i < 4; ++i) {
         if (lighting.light_position[i].w < 0.5) continue;
         int type = int(lighting.light_direction[i].w + 0.5);
@@ -100,11 +120,20 @@ void light_vertex(out vec4 color, out vec3 separate_specular) {
         if (kind == 2) diffuse = pow(diffuse, power);
         sum += (lighting.light_ambient[i].rgb * ambient_material.rgb +
                 lighting.light_diffuse[i].rgb * diffuse_material * diffuse) * scale;
+        // A shadow blocks a light's diffuse and specular, never its ambient:
+        // ambient is the light that arrives by every other path.
+        if (i == shadow_index)
+            shadow_light += lighting.light_diffuse[i].rgb * diffuse_material * diffuse * scale;
         if (kind == 1 && n_dot_l >= 0.0) {
             // The viewer is taken to look down z, as the GE does.
             vec3 half_vector = normalize(to_light + vec3(0.0, 0.0, 1.0));
-            specular += lighting.light_specular[i].rgb * specular_material *
+            vec3 term = lighting.light_specular[i].rgb * specular_material *
                         pow(max(dot(normal, half_vector), 0.0), power) * scale;
+            specular += term;
+            // Only when the specular is folded into the colour here. Kept
+            // apart it is added after texturing, out of reach of the
+            // subtraction the fragment shader does.
+            if (i == shadow_index && object.material_diffuse.w <= 0.5) shadow_light += term;
         }
     }
     float alpha = lighting.ambient.a * ambient_material.a;
@@ -123,6 +152,8 @@ void main() {
     frag_specular = vec3(0.0);
     frag_fog = 1.0;
     frag_uv_rect = vec4(-1e30, -1e30, 1e30, 1e30);
+    frag_shadow_position = vec4(0.0);
+    frag_shadow_light = vec4(0.0);
     if (push.viewport.z > 0.5) {
         vec4 rect = vec4(in_normal.xy, in_normal.z, in_position.w);
         frag_uv_rect = vec4(rect.xy * push.uv_transform.xy + push.uv_transform.zw,
@@ -132,7 +163,20 @@ void main() {
         gl_Position = vec4(ndc, clamp(in_position.z / 65535.0, 0.0, 1.0), 1.0);
     } else {
         int enables = int(push.viewport.w + 0.5);
-        if ((enables & 2) != 0) light_vertex(frag_color, frag_specular);
+        if ((enables & 2) != 0) {
+            vec3 blocked_light = vec3(0.0);
+            light_vertex(frag_color, frag_specular, blocked_light, frag_shadow_position);
+            frag_shadow_light = vec4(blocked_light, 0.0);
+        } else if (lighting.shadow_params.x > 0.0) {
+            // Unlit geometry receives too. Its colours are baked, so there is
+            // no light term to subtract and the fragment shader darkens it
+            // instead. The world matrix is written for every transformed draw
+            // while shadows are on, so it is here to be used.
+            vec4 light_clip = lighting.shadow_transform * (object.world * vec4(in_position.xyz, 1.0));
+            light_clip.z = (light_clip.z + light_clip.w) * 0.5;
+            frag_shadow_position = light_clip;
+            frag_shadow_light = vec4(0.0, 0.0, 0.0, 1.0);
+        }
         // Fog runs linearly from 1 (clear) to 0 (fogged) with view-space z,
         // which is negative in front of the camera: (z + end) * scale.
         if ((enables & 1) != 0)

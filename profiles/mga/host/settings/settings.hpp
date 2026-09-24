@@ -32,6 +32,14 @@ struct Settings {
     bool sharp_screen{};               // nearest instead of linear scaling to the window
     bool sharp_textures{};             // nearest instead of linear texture sampling
     bool smooth_textures{};            // mipmaps and anisotropic filtering, which the PSP had no room for
+    std::uint32_t texture_scale{1u};   // 1 is off; 2/3/4 upscale decoded textures before they are uploaded
+    bool texture_scale_sharp{true};    // edge-preserving rather than plain bicubic, for art drawn texel by texel
+    bool smart_2d{true};               // sample pixel-mapped 2D sharp, whatever the 3D filter is
+    bool post_process{};               // show the frame through a shader pass rather than a plain blit
+    bool fxaa{};                       // anti-alias the finished frame; needs post_process
+    float contact_shadows{};           // 0 off .. 1 strongest; darkens creases from depth; needs post_process
+    float blob_shadows{};              // 0 off .. 1 strongest; a soft blob under each character
+    float shadow_maps{};               // 0 off .. 1 strongest; shadows cast from the game's own lights
     bool unthrottled{};                // let emulated time run ahead of real time
     PerfDisplay perf{PerfDisplay::Off};
 
@@ -75,6 +83,9 @@ struct Settings {
 inline constexpr std::uint32_t kMaxInternalScale = 8u;
 inline constexpr std::uint32_t kMaxWindowScale = 4u;
 inline constexpr std::uint32_t kMaxFontWeight = 2u;
+// Past 4x a scaled texture is mostly invented detail, and the memory it costs
+// is better spent on internal resolution.
+inline constexpr std::uint32_t kMaxTextureScale = 4u;
 
 // Loads the settings on first use.
 [[nodiscard]] Settings &current();

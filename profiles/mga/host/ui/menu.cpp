@@ -263,6 +263,123 @@ void Menu::video() {
             settings::save();
         }
     }
+    {
+        RowOptions o = options_for("video.smart_2d",
+                                   "Draws that place one texel on one screen pixel -- the interface, the cards, "
+                                   "text -- are sampled sharp whatever the filter above says. Smooth filtering "
+                                   "suits the 3D scene but softens flat art that was drawn to be exact.");
+        o.disabled = s.sharp_textures;
+        if (o.disabled) o.note = "already sharp";
+        if (toggle_row("Keep 2D art sharp", s.smart_2d && !s.sharp_textures, o)) {
+            s.smart_2d = !s.smart_2d;
+            renderer().set_smart_2d(s.smart_2d);
+            settings::save();
+        }
+    }
+    {
+        // Cycles Off, 2x, 3x, 4x. The scale is baked into the uploaded image,
+        // so changing it drops every cached texture and the next few frames
+        // pay to decode and scale them again.
+        char label[16];
+        if (s.texture_scale <= 1u) std::snprintf(label, sizeof(label), "Off");
+        else std::snprintf(label, sizeof(label), "%ux", s.texture_scale);
+        if (choice_row("Texture scaling", label,
+                       options_for("video.texture_scale",
+                                   "Enlarges the game's textures before they are drawn, so they keep their detail "
+                                   "at a raised internal resolution instead of being blurred up to it. Costs memory "
+                                   "and a moment's work the first time each texture is seen."))) {
+            s.texture_scale = s.texture_scale >= settings::kMaxTextureScale ? 1u : s.texture_scale + 1u;
+            renderer().set_texture_scale(s.texture_scale, s.texture_scale_sharp);
+            settings::save();
+        }
+        RowOptions o = options_for("video.texture_scale_sharp",
+                                   "How the enlarging is done. Edge-preserving keeps hard edges hard, which suits "
+                                   "card art, text and anything drawn texel by texel. Bicubic is smoother and "
+                                   "better for gradients and painted surfaces.");
+        o.disabled = s.texture_scale <= 1u;
+        if (o.disabled) o.note = "scaling off";
+        if (choice_row("Scaling style", s.texture_scale_sharp ? "Edge-preserving" : "Bicubic", o)) {
+            s.texture_scale_sharp = !s.texture_scale_sharp;
+            renderer().set_texture_scale(s.texture_scale, s.texture_scale_sharp);
+            settings::save();
+        }
+    }
+    {
+        RowOptions o = options_for("video.post_process",
+                                   "Shows the finished frame through a shader pass instead of copying it straight "
+                                   "to the window. On its own it changes nothing; it is what the effects below "
+                                   "need in order to read more than one pixel at a time.");
+        if (toggle_row("Post-processing", s.post_process, o)) {
+            s.post_process = !s.post_process;
+            renderer().set_post_processing(s.post_process, s.fxaa);
+            settings::save();
+        }
+        RowOptions fx = options_for("video.fxaa",
+                                    "Smooths the jagged stair-stepping along edges in the 3D scene. It works on the "
+                                    "finished picture, so it leaves flat areas -- the interface, the cards, text -- "
+                                    "alone and softens only where an edge actually runs.");
+        fx.disabled = !s.post_process;
+        if (fx.disabled) fx.note = "needs post-processing";
+        if (toggle_row("Anti-aliasing (FXAA)", s.fxaa && s.post_process, fx)) {
+            s.fxaa = !s.fxaa;
+            renderer().set_post_processing(s.post_process, s.fxaa);
+            settings::save();
+        }
+    }
+    {
+        // Off, Subtle, Medium, Strong. A float rather than a flag so the
+        // strength can be tuned without another setting.
+        const float levels[4] = {0.0f, 0.35f, 0.6f, 1.0f};
+        const char *names[4] = {"Off", "Subtle", "Medium", "Strong"};
+        int level = 0;
+        for (int i = 3; i > 0; --i)
+            if (s.contact_shadows >= levels[i] - 0.01f) { level = i; break; }
+        RowOptions o = options_for("video.contact_shadows",
+                                   "Darkens the creases where things meet -- where a character stands on the floor, "
+                                   "where a wall joins it. The PSP had no room for this, and it is what makes "
+                                   "characters sit in the scene rather than float above it.");
+        o.disabled = !s.post_process;
+        if (o.disabled) o.note = "needs post-processing";
+        if (const int delta = choice_row("Contact shadows", names[level], o)) {
+            s.contact_shadows = levels[cycle(level, delta, 4)];
+            renderer().set_contact_shadows(s.contact_shadows);
+            settings::save();
+        }
+    }
+    {
+        const float levels[4] = {0.0f, 0.4f, 0.7f, 1.0f};
+        const char *names[4] = {"Off", "Subtle", "Medium", "Strong"};
+        int level = 0;
+        for (int i = 3; i > 0; --i)
+            if (s.blob_shadows >= levels[i] - 0.01f) { level = i; break; }
+        if (const int delta =
+                choice_row("Character shadows", names[level],
+                           options_for("video.blob_shadows",
+                                       "A soft shadow on the ground under each character, drawn with the scene so "
+                                       "it sits under the geometry properly. Works on its own; it does not need "
+                                       "post-processing."))) {
+            s.blob_shadows = levels[cycle(level, delta, 4)];
+            renderer().set_blob_shadows(s.blob_shadows);
+            settings::save();
+        }
+    }
+    {
+        const float levels[4] = {0.0f, 0.5f, 0.75f, 1.0f};
+        const char *names[4] = {"Off", "Subtle", "Medium", "Strong"};
+        int level = 0;
+        for (int i = 3; i > 0; --i)
+            if (s.shadow_maps >= levels[i] - 0.01f) { level = i; break; }
+        if (const int delta =
+                choice_row("Cast shadows", names[level],
+                           options_for("video.shadow_maps",
+                                       "Shadows cast from the game's own light sources, with the shape of whatever "
+                                       "casts them, falling across the scene as the light dictates. The PSP had no "
+                                       "room for this; the characters were given no shadow at all."))) {
+            s.shadow_maps = levels[cycle(level, delta, 4)];
+            renderer().set_shadow_maps(s.shadow_maps);
+            settings::save();
+        }
+    }
     section("Timing");
     {
         struct Mode {
@@ -318,6 +435,9 @@ void Menu::video() {
         restore("video.sharp_screen", s.sharp_screen, d.sharp_screen);
         restore("video.sharp_textures", s.sharp_textures, d.sharp_textures);
         restore("video.smooth_textures", s.smooth_textures, d.smooth_textures);
+        restore("video.texture_scale", s.texture_scale, d.texture_scale);
+        restore("video.texture_scale_sharp", s.texture_scale_sharp, d.texture_scale_sharp);
+        restore("video.smart_2d", s.smart_2d, d.smart_2d);
         restore("video.present_mode", s.present_mode, d.present_mode);
         restore("video.unthrottled", s.unthrottled, d.unthrottled);
         restore("video.performance", s.perf, d.perf);
@@ -328,6 +448,8 @@ void Menu::video() {
         renderer().set_sharp_screen(s.sharp_screen);
         renderer().set_sharp_textures(s.sharp_textures);
         renderer().set_smooth_textures(s.smooth_textures);
+        renderer().set_texture_scale(s.texture_scale, s.texture_scale_sharp);
+        renderer().set_smart_2d(s.smart_2d);
         renderer().set_present_mode(s.present_mode);
         renderer().set_perf_overlay(perf::options().overlay);
         settings::save();

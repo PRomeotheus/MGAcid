@@ -1,6 +1,8 @@
 #include "vulkan_renderer.hpp"
 
+#include "shadow_map.hpp"
 #include "texture_decode.hpp"
+#include "texture_scale.hpp"
 
 #include "perf/frame_stats.hpp"
 #include "perf/perf_overlay.hpp"
@@ -54,6 +56,24 @@ static_assert(sizeof(PushConstants) == 128u, "PushConstants must fit the guarant
 constexpr float kPushFog = 1.0f;
 constexpr float kPushLighting = 2.0f;
 
+// What the post-processing pass needs: where the game rectangle sits inside
+// the window, the scene target's texel size for neighbour taps, and which
+// effects are switched on. Matches the push block in shaders/post.frag.
+struct PostPush {
+    std::array<float, 4> rect{};
+    std::array<float, 2> texel{};
+    std::array<float, 2> effects{};
+    // x: +1 when a larger depth value is nearer, -1 otherwise; y: the tap
+    // radius in target pixels; z: the depth an untouched pixel holds;
+    // w: contact shadow strength, 0 for off.
+    std::array<float, 4> depth{};
+};
+static_assert(sizeof(PostPush) == 48u, "PostPush must match the post shader's push block");
+
+// Descriptor sets the post pass needs: one per render target it samples, and
+// there are only ever a handful of targets.
+constexpr std::size_t kMaxPostSets = 8u;
+
 struct GpuVertex {
     float x{}, y{}, z{}, w{1.0f};
     float u{}, v{};
@@ -62,6 +82,34 @@ struct GpuVertex {
 };
 
 constexpr float kNoClamp = 1e30f;
+
+// True when a through-mode draw maps one texel to one PSP pixel -- the HUD,
+// the cards, text, anything authored to sit on the screen exactly as drawn.
+// Filtering those smoothly is what makes a 2D interface look soft once the
+// internal resolution is raised, so they are sampled sharp instead.
+//
+// Through-mode positions are already in PSP pixels and texture coordinates in
+// texels, so the test is just whether the two spans agree.
+[[nodiscard]] bool pixel_mapped_2d(const std::vector<GpuVertex> &vertices) {
+    if (vertices.size() < 2u) return false;
+    float min_x = vertices[0].x, max_x = vertices[0].x;
+    float min_y = vertices[0].y, max_y = vertices[0].y;
+    float min_u = vertices[0].u, max_u = vertices[0].u;
+    float min_v = vertices[0].v, max_v = vertices[0].v;
+    for (const GpuVertex &v : vertices) {
+        min_x = std::min(min_x, v.x); max_x = std::max(max_x, v.x);
+        min_y = std::min(min_y, v.y); max_y = std::max(max_y, v.y);
+        min_u = std::min(min_u, v.u); max_u = std::max(max_u, v.u);
+        min_v = std::min(min_v, v.v); max_v = std::max(max_v, v.v);
+    }
+    const float du = max_u - min_u;
+    const float dv = max_v - min_v;
+    // A degenerate span says nothing; leave those to ordinary filtering.
+    if (du < 1.0f || dv < 1.0f) return false;
+    constexpr float kTolerance = 0.02f;
+    return std::abs((max_x - min_x) / du - 1.0f) <= kTolerance &&
+           std::abs((max_y - min_y) / dv - 1.0f) <= kTolerance;
+}
 
 void set_uv_rect(GpuVertex &vertex, float u_min, float v_min, float u_max, float v_max) {
     vertex.nx = u_min;
@@ -137,9 +185,13 @@ struct EnvironmentBlock {
     std::array<std::array<float, 4>, 4> light_ambient{};
     std::array<std::array<float, 4>, 4> light_diffuse{};
     std::array<std::array<float, 4>, 4> light_specular{};
+    // Draw space to the shadow light's clip space, then x: strength (0 off),
+    // y: which light casts, z: one shadow map texel, w: depth bias.
+    std::array<float, 16> shadow_transform{};
+    std::array<float, 4> shadow_params{};
 };
 
-static_assert(sizeof(EnvironmentBlock) == 496u, "EnvironmentBlock must match the std140 layout in ge.vert");
+static_assert(sizeof(EnvironmentBlock) == 576u, "EnvironmentBlock must match the std140 layout in ge.vert");
 
 // What a lit draw adds: its world matrix and material. Consecutive draws of
 // one mesh share it, so it is written only when it differs from the last one.
@@ -240,6 +292,33 @@ VkCompareOp to_compare_op(std::uint32_t function) {
     default: return VK_COMPARE_OP_GREATER_OR_EQUAL;
     }
 }
+
+// MGA skins its characters on the CPU and submits them pre-transformed with an
+// identity world matrix, while scenery carries a real one. That identity is how
+// the shadow casters are told apart from everything else -- and it is also what
+// makes their vertices usable as they stand, already in the space the GE's
+// lighting and the shadow map share.
+[[nodiscard]] bool is_identity(const std::array<float, 16> &m) {
+    for (std::uint32_t column = 0; column < 4u; ++column)
+        for (std::uint32_t row = 0; row < 4u; ++row) {
+            const float expected = column == row ? 1.0f : 0.0f;
+            if (std::abs(m[column * 4u + row] - expected) > 1e-4f) return false;
+        }
+    return true;
+}
+
+// A GE colour register as hex, for the shadow trace.
+[[nodiscard]] std::string psprecomp_hex(std::uint32_t value) {
+    static const char *digits = "0123456789abcdef";
+    std::string out = "0x";
+    for (int shift = 28; shift >= 0; shift -= 4) out.push_back(digits[(value >> shift) & 0xFu]);
+    return out;
+}
+
+// How far into the light's depth range a receiver may be before it shadows
+// itself. The light's box spans tens of thousands of units, so this is a few
+// tens of units of slack -- well under one grid cell.
+constexpr float kShadowBias = 0.0015f;
 
 std::array<float, 16> multiply(const std::array<float, 16> &a, const std::array<float, 16> &b) {
     std::array<float, 16> result{};
@@ -428,6 +507,12 @@ struct VulkanRenderer::Impl {
     std::vector<VkImage> swapchain_images;
     VkCommandPool command_pool{};
     VkCommandBuffer command_buffer{};
+    // The shadow pass, recorded once the frame's casters are known but
+    // submitted before the scene, so the scene can sample what it produced.
+    // Recording order and execution order are not the same thing, which is the
+    // whole reason this is a buffer of its own rather than part of the first.
+    VkCommandBuffer shadow_command_buffer{};
+    bool shadow_recorded{};
     VkFence frame_fence{};
     VkSemaphore image_available{};
     VkSemaphore render_finished{};
@@ -450,6 +535,12 @@ struct VulkanRenderer::Impl {
     // distance, which shimmers badly once the internal resolution is raised
     // above the 480x272 that hid it.
     bool smooth_textures{};
+    // Decoded textures are upscaled by this factor before upload, so they
+    // still have detail to give at high internal resolution.
+    std::uint32_t texture_scale{1u};
+    bool texture_scale_sharp{true};
+    // Sample pixel-mapped 2D sharp even when 3D is filtered smoothly.
+    bool smart_2d{true};
     float max_anisotropy{1.0f};
     std::string device_name;
 
@@ -463,6 +554,97 @@ struct VulkanRenderer::Impl {
     bool game_input{true};
     bool suppress_held{};
     std::uint32_t suppressed_buttons{};
+
+    // Post-processing. With it on, the game frame reaches the window as a
+    // fullscreen triangle that samples the render target, instead of the blit
+    // that used to copy it. A draw is what makes room for an effect that has
+    // to read more than one texel: anti-aliasing now, and ambient occlusion
+    // once the depth target is bound alongside the colour.
+    //
+    // The pass also takes over the scaling and the letterboxing the blit did,
+    // so turning it on must not move the picture: the shader is handed the
+    // same rectangle the blit computed.
+    bool post_enabled{};
+    bool post_fxaa{};
+    float post_ao{};
+    // Blob shadows. The casters come from the kernel, which reads them out of
+    // the game's records; the renderer only draws them.
+    float blob_strength{};
+    // Shadow maps cast from the game's own lights; gpu/shadow_map.hpp explains
+    // how the spaces line up and why the map is a frame behind.
+    // Behind a pointer because Impl is move-assigned when the renderer shuts
+    // down, and a type holding raw Vulkan handles has no business being
+    // movable.
+    std::unique_ptr<ShadowMap> shadow_map;
+    float shadow_strength{};
+    std::uint32_t shadow_resolution{1024u};
+    bool shadow_available{};
+    // What binding 2 of the lighting set holds, so it is rewritten only when
+    // the answer changes.
+    VkImageView shadow_bound_view{};
+    // Draw space to the casting light's clip space, and which light that is.
+    std::array<float, 16> shadow_light_transform{};
+    int shadow_light{-1};
+    // The lighting the last lit draw used, which the casting light is chosen
+    // out of.
+    LightingState last_lighting{};
+    bool last_lighting_valid{};
+    void bind_shadow_map();
+    // MGA_TRACE_SHADOWS: every link in the shadow chain, counted per frame, so
+    // one run says which of them is the one that is failing.
+    struct ShadowTrace {
+        std::uint32_t transformed{};   // transformed draws
+        std::uint32_t lit{};           // ... of them lit, so they can receive
+        std::uint32_t identity{};      // ... with an identity world matrix, so they can cast
+        std::uint32_t identity_lit{};  // ... both, which is what is actually collected
+        std::uint32_t casters{};       // caster vertices handed to the map
+        bool resolved{};               // a light was found and a box built
+    };
+    ShadowTrace shadow_trace{};
+    // The game's own world-to-clip matrix. Drawing the blobs with it means the
+    // port never has to decide what space the display list is in.
+    std::array<float, 16> shadow_transform{};
+    bool shadow_transform_valid{};
+    std::vector<ShadowCaster> shadow_casters;
+    bool blobs_drawn{};
+    // Enough of the last transformed draw to put a blob into the same space:
+    // the scene's matrices, its viewport and the target it went to. Copying
+    // the whole DrawCall every draw would mean copying its vertices with it.
+    struct SceneView {
+        bool valid{};
+        std::array<float, 16> view{};
+        std::array<float, 16> projection{};
+        ViewportState viewport{};
+        RenderTarget target{};
+        DepthState depth{};
+        std::uint64_t environment_version{};
+        std::uint64_t material_version{};
+    };
+    SceneView last_scene;
+    // Which way round the depth buffer runs. The GE's viewport decides it per
+    // draw, and MGA does use sceGuDepthRange(65535, 0) in places, so it is
+    // taken from the last transformed draw rather than assumed.
+    bool depth_reversed{};
+    VkRenderPass post_render_pass{};
+    std::vector<VkFramebuffer> post_framebuffers;
+    VkShaderModule post_vertex_shader{};
+    VkShaderModule post_fragment_shader{};
+    VkDescriptorSetLayout post_set_layout{};
+    VkPipelineLayout post_pipeline_layout{};
+    VkPipeline post_pipeline{};
+    // Kept per target view rather than rebuilt: targets outlive the frame.
+    // Changing the screen filtering, or destroying a target, drops them all.
+    std::map<VkImageView, VkDescriptorSet> post_descriptors;
+    bool post_descriptors_sharp{};
+    bool post_descriptors_depth{};
+    bool create_post_pipeline(std::string &error);
+    bool create_post_framebuffers(std::string &error);
+    void drop_post_descriptors();
+    [[nodiscard]] bool post_active() const noexcept {
+        return post_enabled && post_pipeline != VK_NULL_HANDLE && !post_framebuffers.empty();
+    }
+    [[nodiscard]] VkDescriptorSet post_descriptor_for(VkImageView color, VkImageView depth);
+    void record_post(VkImageView color, VkImageView depth, std::uint32_t image_index);
 
     // Window capture: the presented image is copied here and written after
     // its frame completes.
@@ -576,6 +758,35 @@ struct VulkanRenderer::Impl {
     std::array<float, 3> frame_ndc_min{1e30f, 1e30f, 1e30f};
     std::array<float, 3> frame_ndc_max{-1e30f, -1e30f, -1e30f};
     std::map<std::uint32_t, std::uint32_t> frame_transformed_targets;
+    // MGA_FRAME_DIGEST: one record per draw, so a frame can be compared with
+    // the one before it. Frame interpolation needs three things to be true --
+    // that consecutive frames differ at all, that the draw list keeps its
+    // shape, and that the motion shows up in the vertices -- and this answers
+    // all three without guessing.
+    struct DigestDraw {
+        bool through{};
+        std::uint32_t target{};
+        std::uint32_t vertices{};
+        std::uint64_t hash{};
+    };
+    std::vector<DigestDraw> frame_digest;
+    std::vector<DigestDraw> previous_digest;
+    // MGA_TRACE_OBJECTS: where the frame's transformed draws sit. The view
+    // matrix carries rotation only and the camera's position is baked into
+    // each world matrix, so a world matrix's translation is the object's
+    // position in the space the scene is actually drawn in -- which is the
+    // space a blob shadow would have to be placed in too.
+    struct FrameObject {
+        std::array<float, 3> at{};
+        std::uint32_t vertices{};
+        std::uint32_t draws{};
+        // Combined hash of the object's vertex data. A character standing
+        // still animates in its vertices, not its matrix -- the position
+        // never moves, so only this changes.
+        std::uint64_t hash{};
+    };
+    std::vector<FrameObject> frame_objects;
+    std::vector<FrameObject> previous_objects;
     // MGA_TRACE_CAMERA: the view matrices this frame's transformed draws
     // used and how many vertices each of them covered. A frame holds a handful
     // (the scene, a reflection, a shadow pass), and the busiest one is the
@@ -809,7 +1020,7 @@ struct VulkanRenderer::Impl {
     void recreate_swapchain();
     bool create_ui_framebuffers(std::string &error);
     void record_game_blit(VkImage source, VkImage destination);
-    void submit_and_present(VkImage source, bool game_frame);
+    void submit_and_present(const Target *source_target, bool game_frame);
     void write_capture();
     void destroy_target(Target &target);
     void run_commands(const std::function<void(VkCommandBuffer)> &record);
@@ -856,6 +1067,14 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
     impl.sharp_screen = player.sharp_screen;
     impl.sharp_textures = player.sharp_textures;
     impl.smooth_textures = player.smooth_textures;
+    impl.texture_scale = std::clamp<std::uint32_t>(player.texture_scale, 1u, settings::kMaxTextureScale);
+    impl.texture_scale_sharp = player.texture_scale_sharp;
+    impl.smart_2d = player.smart_2d;
+    impl.post_enabled = player.post_process;
+    impl.post_fxaa = player.fxaa;
+    impl.post_ao = std::clamp(player.contact_shadows, 0.0f, 1.0f);
+    impl.blob_strength = std::clamp(player.blob_shadows, 0.0f, 1.0f);
+    impl.shadow_strength = std::clamp(player.shadow_maps, 0.0f, 1.0f);
     const std::uint32_t window_scale = std::clamp<std::uint32_t>(player.window_scale, 1u, settings::kMaxWindowScale);
 
     if (!SDL_Init(SDL_INIT_VIDEO)) {
@@ -1051,7 +1270,7 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
 
     // Set 1: the lighting environment and the lit object, windows into the
     // vertex buffer.
-    std::array<VkDescriptorSetLayoutBinding, 2> lighting_bindings{};
+    std::array<VkDescriptorSetLayoutBinding, 3> lighting_bindings{};
     lighting_bindings[0].binding = 0u;
     lighting_bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
     lighting_bindings[0].descriptorCount = 1u;
@@ -1060,6 +1279,12 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
     lighting_bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
     lighting_bindings[1].descriptorCount = 1u;
     lighting_bindings[1].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    // The shadow map. Bound once with the rest of the lighting rather than per
+    // draw, because every lit draw reads the same one.
+    lighting_bindings[2].binding = 2u;
+    lighting_bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    lighting_bindings[2].descriptorCount = 1u;
+    lighting_bindings[2].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     VkDescriptorSetLayoutCreateInfo lighting_layout_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     lighting_layout_info.bindingCount = static_cast<std::uint32_t>(lighting_bindings.size());
     lighting_layout_info.pBindings = lighting_bindings.data();
@@ -1069,12 +1294,14 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
 
     const std::array<VkDescriptorPoolSize, 2> pool_sizes{
         VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                             static_cast<std::uint32_t>(kMaxCachedTextures + 1u + kMaxFramebufferTextureSets)},
+                             static_cast<std::uint32_t>(kMaxCachedTextures + 1u + kMaxFramebufferTextureSets +
+                                                        kMaxPostSets + 1u)},
         VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 2u},
     };
     VkDescriptorPoolCreateInfo pool_info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     pool_info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-    pool_info.maxSets = static_cast<std::uint32_t>(kMaxCachedTextures + 2u + kMaxFramebufferTextureSets);
+    pool_info.maxSets =
+        static_cast<std::uint32_t>(kMaxCachedTextures + 2u + kMaxFramebufferTextureSets + kMaxPostSets);
     pool_info.poolSizeCount = static_cast<std::uint32_t>(pool_sizes.size());
     pool_info.pPoolSizes = pool_sizes.data();
     if (!check(vkCreateDescriptorPool(impl.device, &pool_info, nullptr, &impl.descriptor_pool),
@@ -1092,6 +1319,22 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
     if (!check(vkCreatePipelineLayout(impl.device, &pipeline_layout_info, nullptr, &impl.pipeline_layout),
                "vkCreatePipelineLayout", error))
         return false;
+
+    // The post-processing pass. Built whether or not it is switched on, so it
+    // can be turned on and off from the menu without rebuilding the device;
+    // if it cannot be built the renderer carries on blitting.
+    // MGA_NO_POST skips building it at all, which is the way to tell a fault
+    // in this pass from one anywhere else.
+    static const bool no_post = std::getenv("MGA_NO_POST") != nullptr;
+    if (no_post) {
+        std::cout << "[render] post-processing disabled by MGA_NO_POST\n";
+    } else if (!impl.create_post_pipeline(error)) {
+        std::cout << "[render] post-processing unavailable: " << error << "\n";
+        error.clear();
+    } else if (!impl.create_post_framebuffers(error)) {
+        std::cout << "[render] post-processing unavailable: " << error << "\n";
+        error.clear();
+    }
 
     VkSamplerCreateInfo sampler_info{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
     sampler_info.magFilter = VK_FILTER_LINEAR;
@@ -1144,6 +1387,9 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
     command_info.commandBufferCount = 1u;
     if (!check(vkAllocateCommandBuffers(impl.device, &command_info, &impl.command_buffer), "vkAllocateCommandBuffers",
                error))
+        return false;
+    if (!check(vkAllocateCommandBuffers(impl.device, &command_info, &impl.shadow_command_buffer),
+               "vkAllocateCommandBuffers", error))
         return false;
     VkFenceCreateInfo fence_info{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     fence_info.flags = VK_FENCE_CREATE_SIGNALED_BIT;
@@ -1198,6 +1444,29 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
 
     const std::uint32_t white = 0xFFFFFFFFu;
     impl.white_texture = impl.create_texture(1u, 1u, &white);
+
+    // Shadow maps cast from the game's own lights. Optional in every sense:
+    // without them the scene draws exactly as it did before, and the setting
+    // defaults to off. MGA_NO_SHADOW_MAP skips building it.
+    static const bool no_shadow_map = std::getenv("MGA_NO_SHADOW_MAP") != nullptr;
+    if (!no_shadow_map) {
+        std::string shadow_error;
+        const ShadowMap::DeviceContext shadow_context{impl.device, impl.physical_device};
+        impl.shadow_map = std::make_unique<ShadowMap>();
+        if (impl.shadow_map->create(shadow_context, impl.shadow_resolution, kShadowVertexShader,
+                                    sizeof(kShadowVertexShader), shadow_error)) {
+            impl.shadow_available = true;
+            // It can be sampled before it has ever been drawn into, so it has
+            // to start in the layout its descriptor claims.
+            impl.run_commands([&](VkCommandBuffer commands) {
+                impl.transition(commands, impl.shadow_map->image(), VK_IMAGE_LAYOUT_UNDEFINED,
+                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+            });
+        } else {
+            std::cout << "[render] shadow maps unavailable: " << shadow_error << "\n";
+        }
+    }
+    impl.bind_shadow_map();
 
     // The overlay is optional: without it the game still runs, only unmeasured
     // on screen.
@@ -1356,6 +1625,7 @@ bool VulkanRenderer::Impl::create_swapchain(std::string &error) {
         swapchain_views.push_back(view);
     }
     if (ui_render_pass != VK_NULL_HANDLE && !create_ui_framebuffers(error)) return false;
+    if (post_render_pass != VK_NULL_HANDLE && !create_post_framebuffers(error)) return false;
     swapchain_dirty = false;
     update_display_info();
     return true;
@@ -1364,6 +1634,8 @@ bool VulkanRenderer::Impl::create_swapchain(std::string &error) {
 void VulkanRenderer::Impl::destroy_swapchain_views() {
     for (VkFramebuffer framebuffer : ui_framebuffers) vkDestroyFramebuffer(device, framebuffer, nullptr);
     ui_framebuffers.clear();
+    for (VkFramebuffer framebuffer : post_framebuffers) vkDestroyFramebuffer(device, framebuffer, nullptr);
+    post_framebuffers.clear();
     for (VkImageView view : swapchain_views) vkDestroyImageView(device, view, nullptr);
     swapchain_views.clear();
 }
@@ -1403,6 +1675,286 @@ bool VulkanRenderer::Impl::create_ui_framebuffers(std::string &error) {
     return true;
 }
 
+// The post-processing pass draws into the swapchain image and leaves it in
+// TRANSFER_DST, which is the layout the blit used to leave behind, so
+// everything after it -- the performance overlay, the interface, the window
+// capture -- is unchanged.
+bool VulkanRenderer::Impl::create_post_pipeline(std::string &error) {
+    VkAttachmentDescription attachment{};
+    attachment.format = swapchain_format;
+    attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    // Every pixel is written: the shader fills the letterbox with black
+    // rather than relying on what was there.
+    attachment.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    attachment.finalLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    VkAttachmentReference reference{0u, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkSubpassDescription subpass{};
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 1u;
+    subpass.pColorAttachments = &reference;
+    // The scene target is sampled here, so its writes have to be finished.
+    VkSubpassDependency dependency{};
+    dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+    dependency.dstSubpass = 0u;
+    dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
+    // Every access bit has to be one the stages it is paired with can perform:
+    // COLOR_ATTACHMENT_WRITE belongs to the colour output stage and
+    // TRANSFER_WRITE to the transfer stage, and naming a stage without its
+    // access bit is a specification violation the layers will report.
+    dependency.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+    dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+    VkRenderPassCreateInfo pass_info{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+    pass_info.attachmentCount = 1u;
+    pass_info.pAttachments = &attachment;
+    pass_info.subpassCount = 1u;
+    pass_info.pSubpasses = &subpass;
+    pass_info.dependencyCount = 1u;
+    pass_info.pDependencies = &dependency;
+    if (!check(vkCreateRenderPass(device, &pass_info, nullptr, &post_render_pass), "vkCreateRenderPass", error))
+        return false;
+
+    const auto create_shader = [&](const std::uint32_t *code, std::size_t size, VkShaderModule &module) {
+        VkShaderModuleCreateInfo info{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+        info.codeSize = size;
+        info.pCode = code;
+        return check(vkCreateShaderModule(device, &info, nullptr, &module), "vkCreateShaderModule", error);
+    };
+    if (!create_shader(kPostVertexShader, sizeof(kPostVertexShader), post_vertex_shader)) return false;
+    if (!create_shader(kPostFragmentShader, sizeof(kPostFragmentShader), post_fragment_shader)) return false;
+
+    // Binding 0 is the finished colour, binding 1 the depth it was drawn with.
+    std::array<VkDescriptorSetLayoutBinding, 2> bindings{};
+    for (std::uint32_t i = 0; i < bindings.size(); ++i) {
+        bindings[i].binding = i;
+        bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        bindings[i].descriptorCount = 1u;
+        bindings[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    }
+    VkDescriptorSetLayoutCreateInfo layout_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    layout_info.bindingCount = static_cast<std::uint32_t>(bindings.size());
+    layout_info.pBindings = bindings.data();
+    if (!check(vkCreateDescriptorSetLayout(device, &layout_info, nullptr, &post_set_layout),
+               "vkCreateDescriptorSetLayout", error))
+        return false;
+
+    VkPushConstantRange push_range{VK_SHADER_STAGE_FRAGMENT_BIT, 0u, sizeof(PostPush)};
+    VkPipelineLayoutCreateInfo pipeline_layout_info{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    pipeline_layout_info.setLayoutCount = 1u;
+    pipeline_layout_info.pSetLayouts = &post_set_layout;
+    pipeline_layout_info.pushConstantRangeCount = 1u;
+    pipeline_layout_info.pPushConstantRanges = &push_range;
+    if (!check(vkCreatePipelineLayout(device, &pipeline_layout_info, nullptr, &post_pipeline_layout),
+               "vkCreatePipelineLayout", error))
+        return false;
+
+    std::array<VkPipelineShaderStageCreateInfo, 2> stages{};
+    stages[0] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = post_vertex_shader;
+    stages[0].pName = "main";
+    stages[1] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = post_fragment_shader;
+    stages[1].pName = "main";
+
+    // The fullscreen triangle's positions come from gl_VertexIndex, so there
+    // is no vertex buffer and no vertex input state to describe.
+    VkPipelineVertexInputStateCreateInfo vertex_input{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    VkPipelineInputAssemblyStateCreateInfo assembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+    assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    VkPipelineViewportStateCreateInfo viewport_state{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+    viewport_state.viewportCount = 1u;
+    viewport_state.scissorCount = 1u;
+    VkPipelineRasterizationStateCreateInfo raster{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+    raster.polygonMode = VK_POLYGON_MODE_FILL;
+    raster.cullMode = VK_CULL_MODE_NONE;
+    raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    raster.lineWidth = 1.0f;
+    VkPipelineMultisampleStateCreateInfo multisample{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+    multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    VkPipelineDepthStencilStateCreateInfo depth{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+    VkPipelineColorBlendAttachmentState blend{};
+    blend.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT |
+                           VK_COLOR_COMPONENT_A_BIT;
+    VkPipelineColorBlendStateCreateInfo blending{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+    blending.attachmentCount = 1u;
+    blending.pAttachments = &blend;
+    const std::array<VkDynamicState, 2> dynamic_states{VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dynamic{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+    dynamic.dynamicStateCount = static_cast<std::uint32_t>(dynamic_states.size());
+    dynamic.pDynamicStates = dynamic_states.data();
+
+    VkGraphicsPipelineCreateInfo info{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+    info.stageCount = static_cast<std::uint32_t>(stages.size());
+    info.pStages = stages.data();
+    info.pVertexInputState = &vertex_input;
+    info.pInputAssemblyState = &assembly;
+    info.pViewportState = &viewport_state;
+    info.pRasterizationState = &raster;
+    info.pMultisampleState = &multisample;
+    info.pDepthStencilState = &depth;
+    info.pColorBlendState = &blending;
+    info.pDynamicState = &dynamic;
+    info.layout = post_pipeline_layout;
+    info.renderPass = post_render_pass;
+    return check(vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1u, &info, nullptr, &post_pipeline),
+                 "vkCreateGraphicsPipelines", error);
+}
+
+bool VulkanRenderer::Impl::create_post_framebuffers(std::string &error) {
+    for (VkImageView view : swapchain_views) {
+        VkFramebufferCreateInfo info{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+        info.renderPass = post_render_pass;
+        info.attachmentCount = 1u;
+        info.pAttachments = &view;
+        info.width = swapchain_extent.width;
+        info.height = swapchain_extent.height;
+        info.layers = 1u;
+        VkFramebuffer framebuffer{};
+        if (!check(vkCreateFramebuffer(device, &info, nullptr, &framebuffer), "vkCreateFramebuffer", error))
+            return false;
+        post_framebuffers.push_back(framebuffer);
+    }
+    return true;
+}
+
+// Points binding 2 of the lighting set at the shadow map, or at the 1x1 white
+// texture when there is nothing to sample. A descriptor a shader can reach has
+// to hold something valid whether or not the shader reads it.
+void VulkanRenderer::Impl::bind_shadow_map() {
+    if (lighting_descriptor == VK_NULL_HANDLE) return;
+    const bool use_map =
+        shadow_available && shadow_strength > 0.0f && shadow_map != nullptr && shadow_map->view() != VK_NULL_HANDLE;
+    const VkImageView wanted = use_map ? shadow_map->view() : white_texture.view;
+    if (wanted == VK_NULL_HANDLE || wanted == shadow_bound_view) return;
+    // Rewriting a set that a queued frame may still be reading is not allowed,
+    // and this happens only when the setting changes.
+    if (shadow_bound_view != VK_NULL_HANDLE) vkDeviceWaitIdle(device);
+    // Nearest, always: a depth format is not required to support linear
+    // filtering, and the shader takes its own nine samples anyway.
+    VkDescriptorImageInfo image{clamp_sharp_sampler, wanted, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    write.dstSet = lighting_descriptor;
+    write.dstBinding = 2u;
+    write.descriptorCount = 1u;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    write.pImageInfo = &image;
+    vkUpdateDescriptorSets(device, 1u, &write, 0u, nullptr);
+    shadow_bound_view = wanted;
+}
+
+void VulkanRenderer::Impl::drop_post_descriptors() {
+    if (post_descriptors.empty()) return;
+    // Rare -- a settings change or a target being rebuilt -- so waiting is
+    // cheaper than tracking which frame each set was last used by.
+    vkDeviceWaitIdle(device);
+    for (auto &[view, set] : post_descriptors) {
+        (void)view;
+        if (set != VK_NULL_HANDLE) vkFreeDescriptorSets(device, descriptor_pool, 1u, &set);
+    }
+    post_descriptors.clear();
+}
+
+VkDescriptorSet VulkanRenderer::Impl::post_descriptor_for(VkImageView color, VkImageView depth) {
+    if (color == VK_NULL_HANDLE) return VK_NULL_HANDLE;
+    // A set is kept under its colour view, so anything else that decides what
+    // it holds has to invalidate the whole cache when it changes -- otherwise
+    // a set built while there was no depth to bind would be reused once
+    // there is, and the shader would read colour as depth.
+    const bool has_depth = depth != VK_NULL_HANDLE;
+    if (post_descriptors_sharp != sharp_screen || post_descriptors_depth != has_depth) drop_post_descriptors();
+    post_descriptors_depth = has_depth;
+    if (const auto found = post_descriptors.find(color); found != post_descriptors.end()) return found->second;
+    if (post_descriptors.size() >= kMaxPostSets) drop_post_descriptors();
+    VkDescriptorSetAllocateInfo allocate{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    allocate.descriptorPool = descriptor_pool;
+    allocate.descriptorSetCount = 1u;
+    allocate.pSetLayouts = &post_set_layout;
+    VkDescriptorSet set{};
+    if (vkAllocateDescriptorSets(device, &allocate, &set) != VK_SUCCESS) return VK_NULL_HANDLE;
+    // A held frame is a plain colour copy with no depth of its own. Binding
+    // the colour twice keeps the set complete; the shader is told the
+    // strength is zero, so it never reads it.
+    //
+    // Depth is always sampled with the nearest filter, never the screen's.
+    // A 32-bit float depth format is not required to support linear
+    // filtering, and most drivers do not offer it, so asking for it would be
+    // undefined -- and a depth buffer has nothing to gain from it anyway.
+    const VkSampler chosen = sharp_screen ? clamp_sharp_sampler : clamp_sampler;
+    std::array<VkDescriptorImageInfo, 2> images{};
+    images[0] = {chosen, color, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    images[1] = {clamp_sharp_sampler, depth != VK_NULL_HANDLE ? depth : color,
+                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    std::array<VkWriteDescriptorSet, 2> writes{};
+    for (std::uint32_t i = 0; i < writes.size(); ++i) {
+        writes[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        writes[i].dstSet = set;
+        writes[i].dstBinding = i;
+        writes[i].descriptorCount = 1u;
+        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[i].pImageInfo = &images[i];
+    }
+    vkUpdateDescriptorSets(device, static_cast<std::uint32_t>(writes.size()), writes.data(), 0u, nullptr);
+    post_descriptors_sharp = sharp_screen;
+    post_descriptors.emplace(color, set);
+    return set;
+}
+
+void VulkanRenderer::Impl::record_post(VkImageView color, VkImageView depth, std::uint32_t image_index) {
+    if (image_index >= post_framebuffers.size()) return;
+    const VkDescriptorSet set = post_descriptor_for(color, depth);
+    if (set == VK_NULL_HANDLE) return;
+
+    const auto width = static_cast<float>(swapchain_extent.width);
+    const auto height = static_cast<float>(swapchain_extent.height);
+    PostPush push{};
+    push.rect = {0.0f, 0.0f, 1.0f, 1.0f};
+    // The same rectangle record_game_blit works out, in normalised
+    // coordinates, so switching the pass on does not nudge the picture.
+    if (keep_aspect && width > 0.0f && height > 0.0f) {
+        const float scale = std::min(width / static_cast<float>(kPspWidth), height / static_cast<float>(kPspHeight));
+        const float shown_width = std::min(std::max(1.0f, std::round(kPspWidth * scale)), width);
+        const float shown_height = std::min(std::max(1.0f, std::round(kPspHeight * scale)), height);
+        push.rect = {std::floor((width - shown_width) * 0.5f) / width,
+                     std::floor((height - shown_height) * 0.5f) / height, shown_width / width,
+                     shown_height / height};
+    }
+    push.texel = {1.0f / static_cast<float>(std::max(target_extent.width, 1u)),
+                  1.0f / static_cast<float>(std::max(target_extent.height, 1u))};
+    push.effects = {post_fxaa ? 1.0f : 0.0f, 0.0f};
+    // With a reversed range the buffer holds 0 at the far plane and a larger
+    // value means nearer; with the ordinary range it is the other way round.
+    // The tap radius follows the internal resolution so the shadow keeps the
+    // same size on screen however far the render target is scaled up.
+    const float radius = std::max(1.5f, static_cast<float>(target_extent.height) / 272.0f * 1.5f);
+    push.depth = {depth_reversed ? 1.0f : -1.0f, radius, depth_reversed ? 0.0f : 1.0f,
+                  depth != VK_NULL_HANDLE ? post_ao : 0.0f};
+
+    VkRenderPassBeginInfo pass{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+    pass.renderPass = post_render_pass;
+    pass.framebuffer = post_framebuffers[image_index];
+    pass.renderArea = {{0, 0}, swapchain_extent};
+    vkCmdBeginRenderPass(command_buffer, &pass, VK_SUBPASS_CONTENTS_INLINE);
+    const VkViewport viewport{0.0f, 0.0f, width, height, 0.0f, 1.0f};
+    vkCmdSetViewport(command_buffer, 0u, 1u, &viewport);
+    const VkRect2D scissor{{0, 0}, swapchain_extent};
+    vkCmdSetScissor(command_buffer, 0u, 1u, &scissor);
+    vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, post_pipeline);
+    vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, post_pipeline_layout, 0u, 1u, &set, 0u,
+                            nullptr);
+    vkCmdPushConstants(command_buffer, post_pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0u, sizeof(push), &push);
+    vkCmdDraw(command_buffer, 3u, 1u, 0u, 0u);
+    vkCmdEndRenderPass(command_buffer);
+    // The scene pipeline and its descriptor bindings are no longer current.
+    bound_pipeline = VK_NULL_HANDLE;
+    lighting_bound = false;
+}
+
 // Scales the game frame onto the swapchain image, which is in TRANSFER_DST
 // layout: stretched over the whole window, or at the PSP's aspect ratio with
 // black bars.
@@ -1440,7 +1992,11 @@ void VulkanRenderer::Impl::record_game_blit(VkImage source, VkImage destination)
 // Finishes the frame being recorded: the game frame (or a plain background
 // when `source` is null), the performance overlay on game frames, the
 // interface, then submit and present.
-void VulkanRenderer::Impl::submit_and_present(VkImage source, bool game_frame) {
+void VulkanRenderer::Impl::submit_and_present(const Target *source_target, bool game_frame) {
+    const VkImage source = source_target != nullptr ? source_target->color : VK_NULL_HANDLE;
+    const VkImageView source_view = source_target != nullptr ? source_target->color_view : VK_NULL_HANDLE;
+    const VkImage source_depth = source_target != nullptr ? source_target->depth : VK_NULL_HANDLE;
+    const VkImageView source_depth_view = source_target != nullptr ? source_target->depth_view : VK_NULL_HANDLE;
     if (swapchain_dirty || swapchain == VK_NULL_HANDLE) recreate_swapchain();
     ImDrawData *ui = ui_ready ? ui_draw_data : nullptr;
     ui_draw_data = nullptr;
@@ -1461,7 +2017,24 @@ void VulkanRenderer::Impl::submit_and_present(VkImage source, bool game_frame) {
     if (can_present) {
         VkImage target = swapchain_images[image_index];
         transition(command_buffer, target, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-        if (source != VK_NULL_HANDLE) {
+        if (source != VK_NULL_HANDLE && post_active() && source_view != VK_NULL_HANDLE) {
+            // Whenever the target has a depth image, not only when the
+            // effect that reads it is switched on: the descriptor set is
+            // built once and would otherwise have to be rebuilt the moment
+            // the setting changed.
+            const bool read_depth = source_depth != VK_NULL_HANDLE;
+            transition(command_buffer, source, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            if (read_depth)
+                transition(command_buffer, source_depth, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+            record_post(source_view, read_depth ? source_depth_view : VK_NULL_HANDLE, image_index);
+            if (read_depth)
+                transition(command_buffer, source_depth, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                           VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+            transition(command_buffer, source, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                       VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        } else if (source != VK_NULL_HANDLE) {
             transition(command_buffer, source, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
             record_game_blit(source, target);
@@ -1518,12 +2091,20 @@ void VulkanRenderer::Impl::submit_and_present(VkImage source, bool game_frame) {
         }
         transition(command_buffer, target, layout, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
     }
+    // The casters are known by now, so the shadow pass can be recorded -- into
+    // its own buffer, which is submitted first and therefore runs before the
+    // scene draws that sample it.
+    if (shadow_available) {
+        shadow_recorded = shadow_map->record(shadow_command_buffer);
+        vkEndCommandBuffer(shadow_command_buffer);
+    }
     vkEndCommandBuffer(command_buffer);
 
     const VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    const std::array<VkCommandBuffer, 2> buffers{shadow_command_buffer, command_buffer};
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    submit.commandBufferCount = 1u;
-    submit.pCommandBuffers = &command_buffer;
+    submit.commandBufferCount = shadow_available ? 2u : 1u;
+    submit.pCommandBuffers = shadow_available ? buffers.data() : &command_buffer;
     if (can_present) {
         submit.waitSemaphoreCount = 1u;
         submit.pWaitSemaphores = &image_available;
@@ -1573,6 +2154,10 @@ void VulkanRenderer::Impl::write_capture() {
 }
 
 void VulkanRenderer::Impl::destroy_target(Target &target) {
+    // A descriptor set still pointing at this target's view would outlive it,
+    // and a later view can be handed back the same handle value.
+    if (target.color_view != VK_NULL_HANDLE && post_descriptors.count(target.color_view) != 0u)
+        drop_post_descriptors();
     for (VkDescriptorSet &descriptor : target.copy_descriptors)
         if (descriptor != VK_NULL_HANDLE) vkFreeDescriptorSets(device, descriptor_pool, 1u, &descriptor);
     vkDestroyImageView(device, target.copy_opaque_view, nullptr);
@@ -1615,15 +2200,20 @@ VulkanRenderer::Impl::Target *VulkanRenderer::Impl::target_for(std::uint32_t add
     if (found != targets.end()) return &found->second;
 
     Target target{};
+    // SAMPLED so the post-processing pass can read the finished frame as a
+    // texture instead of blitting it, which is what lets an effect look at more
+    // than one texel at a time.
     if (!create_image(target_extent.width, target_extent.height, VK_FORMAT_R8G8B8A8_UNORM,
                       VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
-                          VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                          VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
                       target.color,
                       target.color_memory, target.color_view, VK_IMAGE_ASPECT_COLOR_BIT, error))
         return nullptr;
+    // SAMPLED too: the post-processing pass reads the depth to find the
+    // creases where geometry meets, which is where contact shadows go.
     if (!create_image(target_extent.width, target_extent.height, VK_FORMAT_D32_SFLOAT,
-                      VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, target.depth, target.depth_memory,
-                      target.depth_view, VK_IMAGE_ASPECT_DEPTH_BIT, error))
+                      VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, target.depth,
+                      target.depth_memory, target.depth_view, VK_IMAGE_ASPECT_DEPTH_BIT, error))
         return nullptr;
     const std::array<VkImageView, 2> views{target.color_view, target.depth_view};
     VkFramebufferCreateInfo info{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
@@ -1880,7 +2470,14 @@ VulkanRenderer::Impl::Texture &VulkanRenderer::Impl::texture_for(const GuestMemo
         destroy_texture(oldest->second);
         textures.erase(oldest);
     }
-    Texture texture = create_texture(state.width, state.height, pixels.data());
+    // Upscaling happens once per texture, behind the same cache as the decode,
+    // so a texture the game reuses every frame is paid for on its first use.
+    std::uint32_t width = state.width;
+    std::uint32_t height = state.height;
+    if (texture_scale > 1u)
+        (void)scale_texture(pixels, width, height, texture_scale,
+                            texture_scale_sharp ? TextureScaleMode::Sharp : TextureScaleMode::Smooth);
+    Texture texture = create_texture(width, height, pixels.data());
     if (texture.descriptor == VK_NULL_HANDLE) return white_texture;
     return textures.emplace(key, texture).first->second;
 }
@@ -2374,7 +2971,7 @@ void VulkanRenderer::hold_frame(bool hold) {
     std::string error;
     if (!impl.create_image(impl.target_extent.width, impl.target_extent.height, VK_FORMAT_R8G8B8A8_UNORM,
                            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
-                               VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                               VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
                            impl.held.color, impl.held.color_memory, impl.held.color_view, VK_IMAGE_ASPECT_COLOR_BIT,
                            error)) {
         std::cerr << "Renderer: cannot hold the frame (" << error << ")\n";
@@ -2515,6 +3112,88 @@ void VulkanRenderer::set_smooth_textures(bool smooth) {
     std::cout << "[render] texture smoothing " << (smooth ? "on" : "off") << "\n";
 }
 
+void VulkanRenderer::set_shadow_maps(float strength) {
+    Impl &impl = *impl_;
+    if (!impl.ready) return;
+    const float wanted = std::clamp(strength, 0.0f, 1.0f);
+    if (wanted > 0.0f && !impl.shadow_available) {
+        std::cout << "[render] shadow maps are not available on this device\n";
+        return;
+    }
+    if (impl.shadow_strength == wanted) return;
+    impl.shadow_strength = wanted;
+    impl.bind_shadow_map();
+    std::cout << "[render] cast shadows " << (wanted > 0.0f ? "on" : "off") << "\n";
+}
+
+void VulkanRenderer::set_blob_shadows(float strength) {
+    Impl &impl = *impl_;
+    if (!impl.ready) return;
+    const float wanted = std::clamp(strength, 0.0f, 1.0f);
+    if (impl.blob_strength == wanted) return;
+    impl.blob_strength = wanted;
+    std::cout << "[render] character shadows " << (wanted > 0.0f ? "on" : "off") << "\n";
+}
+
+void VulkanRenderer::set_shadow_casters(const std::array<float, 16> &world_to_clip,
+                                        const std::vector<ShadowCaster> &casters) {
+    Impl &impl = *impl_;
+    if (!impl.ready) return;
+    impl.shadow_transform = world_to_clip;
+    impl.shadow_transform_valid = true;
+    impl.shadow_casters = casters;
+}
+
+void VulkanRenderer::set_contact_shadows(float strength) {
+    Impl &impl = *impl_;
+    if (!impl.ready) return;
+    const float wanted = std::clamp(strength, 0.0f, 1.0f);
+    if (impl.post_ao == wanted) return;
+    impl.post_ao = wanted;
+    std::cout << "[render] contact shadows " << (wanted > 0.0f ? "on" : "off") << "\n";
+}
+
+void VulkanRenderer::set_post_processing(bool enabled, bool fxaa) {
+    Impl &impl = *impl_;
+    if (!impl.ready) return;
+    if (enabled && impl.post_pipeline == VK_NULL_HANDLE) {
+        // The pass could not be built on this device; say so once rather than
+        // leaving a setting that silently does nothing.
+        std::cout << "[render] post-processing is not available on this device\n";
+        return;
+    }
+    if (impl.post_enabled == enabled && impl.post_fxaa == fxaa) return;
+    impl.post_enabled = enabled;
+    impl.post_fxaa = fxaa;
+    std::cout << "[render] post-processing " << (enabled ? "on" : "off") << ", anti-aliasing "
+              << (enabled && fxaa ? "on" : "off") << "\n";
+}
+
+void VulkanRenderer::set_smart_2d(bool smart) {
+    Impl &impl = *impl_;
+    if (!impl.ready || impl.smart_2d == smart) return;
+    impl.smart_2d = smart;
+    // Nothing cached depends on it: the decision is made per draw.
+    std::cout << "[render] sharp 2D " << (smart ? "on" : "off") << "\n";
+}
+
+void VulkanRenderer::set_texture_scale(std::uint32_t factor, bool sharp) {
+    Impl &impl = *impl_;
+    factor = std::clamp<std::uint32_t>(factor, 1u, settings::kMaxTextureScale);
+    if (!impl.ready || impl.recording) return;
+    if (impl.texture_scale == factor && impl.texture_scale_sharp == sharp) return;
+    impl.texture_scale = factor;
+    impl.texture_scale_sharp = sharp;
+    // The scale is baked into the uploaded image, not into the sampler, so
+    // every cached texture has to go -- the same reason smoothing drops them.
+    vkDeviceWaitIdle(impl.device);
+    for (auto &[key, texture] : impl.textures) impl.destroy_texture(texture);
+    impl.textures.clear();
+    impl.list_texture_keys.clear();
+    if (factor <= 1u) std::cout << "[render] texture scaling off\n";
+    else std::cout << "[render] texture scaling " << factor << "x, " << (sharp ? "edge-preserving" : "bicubic") << "\n";
+}
+
 void VulkanRenderer::set_sharp_textures(bool sharp) {
     Impl &impl = *impl_;
     if (!impl.ready || impl.recording || impl.sharp_textures == sharp) return;
@@ -2641,10 +3320,10 @@ void VulkanRenderer::present_ui(bool show_game) {
     if (!impl.ready) return;
     if (!impl.recording) begin_frame();
     impl.end_pass();
-    VkImage source = VK_NULL_HANDLE;
+    const Impl::Target *source = nullptr;
     if (show_game) {
         if (const auto shown = impl.targets.find(impl.presented_target); shown != impl.targets.end())
-            source = shown->second.color;
+            source = &shown->second;
     }
     impl.submit_and_present(source, false);
 }
@@ -2671,6 +3350,15 @@ void VulkanRenderer::begin_frame() {
     impl.environment_version = 0u;
     impl.object_valid = false;
     impl.forget_bindings();
+    impl.shadow_recorded = false;
+    impl.shadow_light = -1;
+    if (impl.shadow_available) {
+        vkResetCommandBuffer(impl.shadow_command_buffer, 0u);
+        VkCommandBufferBeginInfo shadow_begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        shadow_begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(impl.shadow_command_buffer, &shadow_begin);
+        impl.shadow_map->begin_frame();
+    }
     impl.pass_active = false;
     impl.recording = true;
 }
@@ -2743,6 +3431,15 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     if (!impl.ready) return;
     if (!impl.recording) begin_frame();
     if (call.vertices.empty()) return;
+
+    // The blobs belong after the scene and before the interface. The first
+    // through-mode draw of a frame that has drawn 3D is exactly that seam:
+    // everything from here on is flat and would paint over them.
+    if (call.through && !impl.blobs_drawn && impl.frame_transformed_draws != 0u && impl.blob_strength > 0.0f &&
+        impl.shadow_transform_valid && !impl.shadow_casters.empty()) {
+        impl.blobs_drawn = true;
+        draw_shadow_blobs(memory);
+    }
 
     // Everything becomes a triangle list; sprites expand to two triangles.
     impl.scratch.clear();
@@ -2970,11 +3667,65 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
         }
     }
 
+    static const bool frame_digest = std::getenv("MGA_FRAME_DIGEST") != nullptr;
+    static const bool want_hash = frame_digest || std::getenv("MGA_TRACE_OBJECTS") != nullptr;
+    std::uint64_t vertex_hash = 0u;
+    if (want_hash) {
+        vertex_hash = 1469598103934665603ull;
+        const auto *bytes = reinterpret_cast<const std::uint8_t *>(impl.scratch.data());
+        const std::size_t count = impl.scratch.size() * sizeof(GpuVertex);
+        for (std::size_t i = 0; i < count; ++i) vertex_hash = (vertex_hash ^ bytes[i]) * 1099511628211ull;
+    }
+    if (frame_digest)
+        impl.frame_digest.push_back({call.through, call.target.color_address,
+                                     static_cast<std::uint32_t>(impl.scratch.size()), vertex_hash});
     if (call.through) {
         ++impl.frame_through_draws;
     } else {
         ++impl.frame_transformed_draws;
+        if (!call.clear_mode) {
+            ++impl.shadow_trace.transformed;
+            const bool identity = is_identity(call.world);
+            if (lit) ++impl.shadow_trace.lit;
+            if (identity) ++impl.shadow_trace.identity;
+            if (lit && identity) ++impl.shadow_trace.identity_lit;
+        }
+        // Everything the scene draws casts. Restricting this to the
+        // characters meant relying on spotting them by their identity world
+        // matrix, and if that test is ever wrong there are simply no casters
+        // and no shadows, with nothing to show why. Casting from all of it
+        // cannot fail that way, and it gets the scenery shadowing the floor as
+        // a bonus. MGA_SHADOW_CHARACTERS_ONLY goes back to the narrow test.
+        static const bool characters_only = std::getenv("MGA_SHADOW_CHARACTERS_ONLY") != nullptr;
+        if (impl.shadow_available && impl.shadow_map != nullptr && impl.shadow_strength > 0.0f &&
+            !impl.scratch.empty() && !call.clear_mode && (!characters_only || is_identity(call.world))) {
+            impl.shadow_map->add_casters(&impl.scratch[0].x, impl.scratch.size(),
+                                        sizeof(GpuVertex) / sizeof(float), call.world);
+            impl.shadow_trace.casters = static_cast<std::uint32_t>(impl.shadow_map->captured());
+        }
+        if (!call.clear_mode) {
+            impl.last_scene = {true,  call.view,  call.projection,          call.viewport,
+                               call.target, call.depth, call.environment_version, call.material_version};
+        }
         ++impl.frame_transformed_targets[call.target.color_address];
+        static const bool trace_objects = std::getenv("MGA_TRACE_OBJECTS") != nullptr;
+        if (trace_objects) {
+            const std::array<float, 3> at{call.world[12], call.world[13], call.world[14]};
+            const auto same = std::find_if(impl.frame_objects.begin(), impl.frame_objects.end(),
+                                           [&](const Impl::FrameObject &o) {
+                                               return std::abs(o.at[0] - at[0]) < 0.01f &&
+                                                      std::abs(o.at[1] - at[1]) < 0.01f &&
+                                                      std::abs(o.at[2] - at[2]) < 0.01f;
+                                           });
+            if (same == impl.frame_objects.end())
+                impl.frame_objects.push_back(
+                    {at, static_cast<std::uint32_t>(impl.scratch.size()), 1u, vertex_hash});
+            else {
+                same->vertices += static_cast<std::uint32_t>(impl.scratch.size());
+                ++same->draws;
+                same->hash ^= vertex_hash * 1099511628211ull;
+            }
+        }
         if (trace_camera) {
             const auto same = std::find_if(impl.frame_views.begin(), impl.frame_views.end(),
                                            [&](const auto &entry) { return entry.first == call.view; });
@@ -3015,6 +3766,22 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     // object block. Each is written into the vertex buffer only when it
     // changed, and the vertices follow whatever was written.
     const bool fogged = call.fog.enabled && !no_fog && !call.through && !call.clear_mode;
+    // The shading pass needs the light's matrix while it draws, so it is
+    // settled at the first lit draw of the frame, before the environment block
+    // below is written with it.
+    // Any transformed draw will do to settle the light: the lighting registers
+    // are the same for the whole frame, and waiting for a lit one meant no
+    // shadows at all in a scene that draws its world unlit.
+    if (!call.through && !call.clear_mode && impl.shadow_available && impl.shadow_map != nullptr &&
+        impl.shadow_strength > 0.0f && impl.shadow_light < 0) {
+        impl.last_lighting = call.lighting;
+        impl.last_lighting_valid = true;
+        impl.shadow_trace.resolved = impl.shadow_map->resolve_light(call.lighting);
+        if (impl.shadow_trace.resolved) {
+            impl.shadow_light_transform = impl.shadow_map->transform();
+            impl.shadow_light = impl.shadow_map->light_index();
+        }
+    }
     const auto view_world = multiply(call.view, call.world);
     if ((lit || fogged) && impl.environment_version != call.environment_version) {
         const LightingState &state = call.lighting;
@@ -3022,6 +3789,17 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
         environment.ambient = unpack_color(state.ambient_color, static_cast<float>(state.ambient_alpha) / 255.0f);
         environment.fog = {call.fog.end, call.fog.scale, 0.0f, 0.0f};
         environment.fog_color = unpack_color(call.fog.color);
+        // MGA_SHADOW_DEBUG: a negative texel size tells the shader to paint
+        // the shadow red instead of darkening, so it cannot be missed.
+        static const bool shadow_debug = std::getenv("MGA_SHADOW_DEBUG") != nullptr;
+        environment.shadow_transform = impl.shadow_light_transform;
+        const bool casting = impl.shadow_light >= 0 && impl.shadow_strength > 0.0f;
+        environment.shadow_params = {casting ? impl.shadow_strength : 0.0f,
+                                     static_cast<float>(std::max(impl.shadow_light, 0)),
+                                     casting ? (shadow_debug ? -1.0f : 1.0f) /
+                                                   static_cast<float>(impl.shadow_map->resolution())
+                                             : 0.0f,
+                                     kShadowBias};
         for (std::size_t i = 0; i < state.lights.size(); ++i) {
             const LightState &light = state.lights[i];
             environment.light_position[i] = {light.position[0], light.position[1], light.position[2],
@@ -3038,7 +3816,14 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
         if (!impl.write_uniform(&environment, sizeof(environment), impl.environment_offset)) return;
         impl.environment_version = call.environment_version;
     }
-    if (lit) {
+    // Unlit geometry receives shadows too, and to find itself in the light's
+    // map it needs its world matrix, which lives in the object block. So while
+    // shadows are on the block is written for every transformed draw, not only
+    // the lit ones -- otherwise an unlit draw would read whichever world matrix
+    // the last lit draw happened to leave there.
+    const bool needs_object =
+        lit || (impl.shadow_light >= 0 && impl.shadow_strength > 0.0f && !call.through && !call.clear_mode);
+    if (needs_object) {
         const LightingState &state = call.lighting;
         if (impl.material_version != call.material_version) {
             impl.material[0] = unpack_color(state.material_emissive, state.specular_power);
@@ -3114,7 +3899,21 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     push.viewport = {static_cast<float>(kPspWidth), static_cast<float>(kPspHeight), call.through ? 1.0f : 0.0f,
                      (fogged ? kPushFog : 0.0f) + (lit ? kPushLighting : 0.0f)};
     push.view_z = {view_world[2], view_world[6], view_world[10], view_world[14]};
-    push.texture_params = {call.texture.enabled ? 1.0f : 0.0f, static_cast<float>(call.texture.function | (call.texture.color_double ? 8u : 0u)),
+    // Bit 4 asks the shader to snap texture coordinates to texel centres,
+    // which turns the smooth sampler into a sharp one for this draw alone.
+    // uv_transform carries 1/size in through mode, which is what it needs.
+    //
+    // Not when texture scaling is on: the shader snaps to the GUEST texel
+    // grid, so snapping an enlarged texture would throw away every texel the
+    // scaling just added and put the blocks straight back. With a scaled
+    // texture, ordinary sampling already lands close to one screen pixel per
+    // texel, which is the crispness the snap was there to get.
+    const bool snap_uv = impl.smart_2d && !impl.sharp_textures && impl.texture_scale <= 1u &&
+                         call.through && call.texture.enabled && call.texture.width != 0u &&
+                         pixel_mapped_2d(impl.scratch);
+    push.texture_params = {call.texture.enabled ? 1.0f : 0.0f,
+                           static_cast<float>(call.texture.function | (call.texture.color_double ? 8u : 0u) |
+                                              (snap_uv ? 16u : 0u)),
                            static_cast<float>(call.alpha_test.enabled ? call.alpha_test.reference : 0u),
                            static_cast<float>(call.alpha_test.enabled ? call.alpha_test.function : 0u)};
     // Through-mode texture coordinates are in texels, transformed ones in [0,1].
@@ -3193,6 +3992,9 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
         // this is a flipping viewport. That keeps framebuffer space identical to
         // the PSP's screen space, which is what the cull winding is defined in.
         vk_viewport.height = 2.0f * vp.y_scale * render_scale;
+        // Which way the depth buffer runs, for the contact shadows in the
+        // post pass: a negative z scale puts the far plane at 0.
+        impl.depth_reversed = vp.z_scale < 0.0f;
         if (vp.z_scale != 0.0f) {
             // The shader hands over device z in [0, 1]; this undoes that halving
             // and applies the GE's z scale/offset, reproducing a reversed range
@@ -3247,6 +4049,84 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     vkCmdDraw(impl.command_buffer, static_cast<std::uint32_t>(impl.scratch.size()), 1u, 0u, 0u);
     impl.vertex_offset += bytes;
     ++impl.draws;
+}
+
+void VulkanRenderer::draw_shadow_blobs(const GuestMemory &memory) {
+    Impl &impl = *impl_;
+    if (!impl.last_scene.valid || !impl.shadow_transform_valid) return;
+
+    // A fan: one dark vertex at the centre and a ring of transparent ones, so
+    // the blob fades out towards its edge without needing a texture.
+    constexpr std::size_t kSegments = 16u;
+    // High enough off the floor not to fight it for the depth buffer, low
+    // enough to stay hidden under a step or a crate.
+    constexpr float kLift = 10.0f;
+    constexpr float kMaxAlpha = 165.0f;
+
+    const auto alpha =
+        static_cast<std::uint32_t>(std::lround(std::clamp(impl.blob_strength, 0.0f, 1.0f) * kMaxAlpha));
+    if (alpha == 0u) return;
+    // The GE's vertex colour is ABGR, so black with an alpha is the alpha
+    // alone in the top byte.
+    const std::uint32_t centre = alpha << 24u;
+    const std::uint32_t rim = 0u;
+
+    DrawCall blob{};
+    blob.primitive = PrimitiveType::Triangles;
+    blob.target = impl.last_scene.target;
+    blob.viewport = impl.last_scene.viewport;
+    // The vertices are in world space and the game's own world-to-clip matrix
+    // takes them the whole way, so the view and world matrices are the
+    // identity and the renderer's projection slot carries that matrix. This
+    // sidesteps the question of what space the display list is drawn in --
+    // which is what put the first attempt's blobs somewhere out in the scene
+    // instead of under the characters.
+    constexpr std::array<float, 16> kIdentity{1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+                                              0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f};
+    blob.view = kIdentity;
+    blob.world = kIdentity;
+    blob.projection = impl.shadow_transform;
+    blob.has_vertex_color = true;
+    blob.lighting_enabled = false;
+    blob.culling_enabled = false;
+    blob.blend.enabled = true;
+    blob.blend.source_factor = 2u;       // source alpha
+    blob.blend.destination_factor = 3u;  // one minus source alpha
+    // Tested against the scene so a blob is hidden by anything in front of
+    // it, but never written, so it cannot occlude what comes after.
+    blob.depth = impl.last_scene.depth;
+    blob.depth.test_enabled = true;
+    blob.depth.write_enabled = false;
+    blob.environment_version = impl.last_scene.environment_version;
+    blob.material_version = impl.last_scene.material_version;
+    blob.vertices.reserve(kSegments * 3u);
+
+    for (const ShadowCaster &caster : impl.shadow_casters) {
+        const float radius = caster.radius;
+        if (!(radius > 0.0f)) continue;
+        const std::array<float, 3> at{caster.position[0], caster.ground + kLift, caster.position[2]};
+        blob.vertices.clear();
+        for (std::size_t i = 0; i < kSegments; ++i) {
+            const auto angle = [&](std::size_t step) {
+                return 6.283185307f * static_cast<float>(step % kSegments) / static_cast<float>(kSegments);
+            };
+            const float a0 = angle(i);
+            const float a1 = angle(i + 1u);
+            Vertex middle{};
+            middle.position = {at[0], at[1], at[2], 1.0f};
+            middle.color = centre;
+            Vertex first{};
+            first.position = {at[0] + std::cos(a0) * radius, at[1], at[2] + std::sin(a0) * radius, 1.0f};
+            first.color = rim;
+            Vertex second{};
+            second.position = {at[0] + std::cos(a1) * radius, at[1], at[2] + std::sin(a1) * radius, 1.0f};
+            second.color = rim;
+            blob.vertices.push_back(middle);
+            blob.vertices.push_back(first);
+            blob.vertices.push_back(second);
+        }
+        submit(blob, memory);
+    }
 }
 
 void VulkanRenderer::write_back_frame(GuestMemory &memory) {
@@ -3352,6 +4232,121 @@ void VulkanRenderer::present(std::uint32_t display_address) {
     if (!impl.recording) begin_frame();
     impl.end_pass();
 
+    static const bool frame_digest_on = std::getenv("MGA_FRAME_DIGEST") != nullptr;
+    if (frame_digest_on) {
+        const auto &now = impl.frame_digest;
+        const auto &before = impl.previous_digest;
+        // Same count, order, kind and size of draws: the pairing that frame
+        // interpolation would rely on is available.
+        bool same_shape = now.size() == before.size();
+        std::size_t moved = 0u;
+        std::size_t moved_through = 0u;
+        if (same_shape) {
+            for (std::size_t i = 0; i < now.size(); ++i) {
+                // The target address is deliberately not compared: the game
+                // double-buffers, so it alternates every frame and would make
+                // every frame look like a changed list.
+                if (now[i].through != before[i].through || now[i].vertices != before[i].vertices) {
+                    same_shape = false;
+                    break;
+                }
+                if (now[i].hash != before[i].hash) {
+                    ++moved;
+                    if (now[i].through) ++moved_through;
+                }
+            }
+        }
+        std::size_t through = 0u;
+        for (const auto &draw : now) through += draw.through ? 1u : 0u;
+        std::cout << "[digest] frame " << impl.frames << " draws=" << now.size() << " (through " << through
+                  << ") shape=" << (same_shape ? "same" : "CHANGED");
+        if (same_shape)
+            std::cout << " moved=" << moved << "/" << now.size() << " (2D " << moved_through << ")"
+                      << (moved == 0u ? "  (identical frame)" : "");
+        std::cout << "\n";
+        impl.previous_digest = impl.frame_digest;
+        impl.frame_digest.clear();
+    }
+    static const bool trace_objects_on = std::getenv("MGA_TRACE_OBJECTS") != nullptr;
+    if (trace_objects_on && !impl.frame_objects.empty()) {
+        // The camera's position is baked into every world matrix, so when the
+        // camera moves EVERY object's translation shifts by the same amount.
+        // Comparing translations between frames therefore finds the camera, not
+        // the characters. The median shift is the camera; an object whose shift
+        // differs from it is one that genuinely moved.
+        //
+        // Objects are matched between frames by their draw signature (vertex
+        // and draw count) rather than position, for the same reason.
+        std::vector<std::array<float, 3>> deltas;
+        std::vector<std::pair<const Impl::FrameObject *, std::array<float, 3>>> shifted;
+        for (const Impl::FrameObject &o : impl.frame_objects) {
+            const Impl::FrameObject *best = nullptr;
+            float best_distance = 1e30f;
+            for (const Impl::FrameObject &q : impl.previous_objects) {
+                if (q.vertices != o.vertices || q.draws != o.draws) continue;
+                const float dx = q.at[0] - o.at[0], dy = q.at[1] - o.at[1], dz = q.at[2] - o.at[2];
+                const float distance = dx * dx + dy * dy + dz * dz;
+                if (distance < best_distance) { best_distance = distance; best = &q; }
+            }
+            if (best == nullptr) continue;
+            const std::array<float, 3> delta{o.at[0] - best->at[0], o.at[1] - best->at[1], o.at[2] - best->at[2]};
+            deltas.push_back(delta);
+            shifted.emplace_back(&o, delta);
+        }
+        std::array<float, 3> camera{};
+        for (std::uint32_t axis = 0; axis < 3u; ++axis) {
+            std::vector<float> values;
+            values.reserve(deltas.size());
+            for (const auto &delta : deltas) values.push_back(delta[axis]);
+            if (values.empty()) continue;
+            std::nth_element(values.begin(), values.begin() + values.size() / 2u, values.end());
+            camera[axis] = values[values.size() / 2u];
+        }
+        std::size_t movers = 0u;
+        std::cout << "[objects] frame " << impl.frames << " distinct=" << impl.frame_objects.size()
+                  << " matched=" << shifted.size() << " camera=(" << camera[0] << ", " << camera[1] << ", "
+                  << camera[2] << ")\n";
+        for (const auto &[object, delta] : shifted) {
+            if (std::abs(delta[0] - camera[0]) < 0.5f && std::abs(delta[1] - camera[1]) < 0.5f &&
+                std::abs(delta[2] - camera[2]) < 0.5f)
+                continue;
+            if (++movers > 12u) break;
+            std::cout << "   moving at (" << object->at[0] << ", " << object->at[1] << ", " << object->at[2]
+                      << ") verts=" << object->vertices << " draws=" << object->draws << " by ("
+                      << delta[0] - camera[0] << ", " << delta[1] - camera[1] << ", " << delta[2] - camera[2]
+                      << ")\n";
+        }
+        // Objects that hold their position but whose vertices change: a
+        // character animating in place. This is what a matrix-only test misses
+        // entirely, and for a mostly-fixed camera it is most of them.
+        std::size_t animated = 0u;
+        for (const Impl::FrameObject &o : impl.frame_objects) {
+            const auto same = std::find_if(impl.previous_objects.begin(), impl.previous_objects.end(),
+                                           [&](const Impl::FrameObject &q) {
+                                               return q.vertices == o.vertices && q.draws == o.draws &&
+                                                      std::abs(q.at[0] - o.at[0]) < 0.5f &&
+                                                      std::abs(q.at[1] - o.at[1]) < 0.5f &&
+                                                      std::abs(q.at[2] - o.at[2]) < 0.5f;
+                                           });
+            if (same == impl.previous_objects.end() || same->hash == o.hash) continue;
+            if (++animated > 12u) break;
+            std::cout << "   animated at (" << o.at[0] << ", " << o.at[1] << ", " << o.at[2] << ") verts="
+                      << o.vertices << " draws=" << o.draws << "\n";
+        }
+        // Every object once, smallest first, so characters are not hidden behind
+        // the scenery in a top-by-size list. One frame in sixty is plenty.
+        if (impl.frames % 60u == 0u) {
+            auto sorted = impl.frame_objects;
+            std::sort(sorted.begin(), sorted.end(),
+                      [](const Impl::FrameObject &a, const Impl::FrameObject &b) { return a.vertices < b.vertices; });
+            std::cout << "   -- all objects, smallest first --\n";
+            for (const Impl::FrameObject &o : sorted)
+                std::cout << "   at (" << o.at[0] << ", " << o.at[1] << ", " << o.at[2] << ") verts=" << o.vertices
+                          << " draws=" << o.draws << "\n";
+        }
+        impl.previous_objects = impl.frame_objects;
+        impl.frame_objects.clear();
+    }
     static const bool trace3d = std::getenv("MGA_TRACE_3D") != nullptr;
     static const bool trace_camera = std::getenv("MGA_TRACE_CAMERA") != nullptr;
     if (trace3d && impl.frame_transformed_draws != 0u) {
@@ -3400,8 +4395,38 @@ void VulkanRenderer::present(std::uint32_t display_address) {
                   << "," << py << "," << pz << " views=" << impl.frame_views.size() << "\n";
         std::cout.flags(flags);
     }
+    // MGA_TRACE_SHADOWS: one line a second naming every link in the chain, so
+    // a single run says which one is failing rather than which might be.
+    static const bool trace_shadows = std::getenv("MGA_TRACE_SHADOWS") != nullptr;
+    if (trace_shadows) {
+        static std::uint64_t last_report = 0u;
+        if (impl.frames >= last_report + 60u) {
+            last_report = impl.frames;
+            const Impl::ShadowTrace &s = impl.shadow_trace;
+            std::cout << "[shadow] built=" << (impl.shadow_available ? 1 : 0)
+                      << " strength=" << std::fixed << std::setprecision(2) << impl.shadow_strength
+                      << " | transformed=" << s.transformed << " lit=" << s.lit << " identity=" << s.identity
+                      << " both=" << s.identity_lit << " casterverts=" << s.casters
+                      << " | resolved=" << (s.resolved ? 1 : 0) << " light=" << impl.shadow_light;
+            if (impl.shadow_light >= 0 && impl.last_lighting_valid) {
+                const LightState &light = impl.last_lighting.lights[static_cast<std::size_t>(impl.shadow_light)];
+                std::cout << " type=" << light.type << " diffuse=" << psprecomp_hex(light.diffuse);
+            }
+            if (impl.shadow_map != nullptr && impl.shadow_map->has_box()) {
+                const auto &lo = impl.shadow_map->box_minimum();
+                const auto &hi = impl.shadow_map->box_maximum();
+                const auto &dir = impl.shadow_map->light_direction();
+                std::cout << "\n[shadow] box (" << lo[0] << ", " << lo[1] << ", " << lo[2] << ") .. (" << hi[0]
+                          << ", " << hi[1] << ", " << hi[2] << ")  towards light (" << dir[0] << ", " << dir[1]
+                          << ", " << dir[2] << ")";
+            }
+            std::cout << std::endl;
+        }
+        impl.shadow_trace = {};
+    }
     impl.frame_views.clear();
     impl.frame_through_draws = 0u;
+    impl.blobs_drawn = false;
     impl.frame_transformed_draws = 0u;
     impl.frame_transformed_vertices = 0u;
     impl.frame_onscreen_vertices = 0u;
@@ -3416,9 +4441,9 @@ void VulkanRenderer::present(std::uint32_t display_address) {
     // Show the target the guest flipped to; fall back to whatever was drawn last.
     auto displayed = impl.targets.find(display_address);
     if (displayed == impl.targets.end()) displayed = impl.targets.find(impl.last_drawn_target);
-    VkImage source = displayed != impl.targets.end() ? displayed->second.color : VK_NULL_HANDLE;
+    const Impl::Target *source = displayed != impl.targets.end() ? &displayed->second : nullptr;
     impl.presented_target = displayed != impl.targets.end() ? displayed->first : 0u;
-    if (impl.holding) source = impl.held.color;
+    if (impl.holding) source = &impl.held;
     impl.submit_and_present(source, true);
     ++impl.frames;
 }
@@ -3539,6 +4564,14 @@ void VulkanRenderer::shutdown() {
     vkDestroySampler(impl.device, impl.sharp_sampler, nullptr);
     vkDestroySampler(impl.device, impl.clamp_sampler, nullptr);
     vkDestroySampler(impl.device, impl.clamp_sharp_sampler, nullptr);
+    if (impl.shadow_map) impl.shadow_map->destroy();
+    impl.drop_post_descriptors();
+    vkDestroyPipeline(impl.device, impl.post_pipeline, nullptr);
+    vkDestroyPipelineLayout(impl.device, impl.post_pipeline_layout, nullptr);
+    vkDestroyDescriptorSetLayout(impl.device, impl.post_set_layout, nullptr);
+    vkDestroyShaderModule(impl.device, impl.post_vertex_shader, nullptr);
+    vkDestroyShaderModule(impl.device, impl.post_fragment_shader, nullptr);
+    vkDestroyRenderPass(impl.device, impl.post_render_pass, nullptr);
     vkDestroyDescriptorPool(impl.device, impl.descriptor_pool, nullptr);
     vkDestroyDescriptorSetLayout(impl.device, impl.descriptor_layout, nullptr);
     vkDestroyDescriptorSetLayout(impl.device, impl.lighting_layout, nullptr);

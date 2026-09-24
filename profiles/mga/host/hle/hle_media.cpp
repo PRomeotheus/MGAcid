@@ -3,6 +3,7 @@
 // list completion callbacks, blocking audio output); the drawing and the
 // mixing themselves live under gpu/ and audio/.
 #include "hle_common.hpp"
+#include "kernel/scene.hpp"
 
 #include "overlays.hpp"
 
@@ -294,10 +295,48 @@ bool should_present(DisplayState &display, std::uint32_t previous_framebuffer) {
     return true;
 }
 
+#if defined(MGA_HAS_RENDERER)
+// Hands the renderer the characters to put a shadow under, once a frame.
+//
+// The game's own shadows are cast by the scenery; the characters have none,
+// and the renderer cannot work out where they are for itself, because they
+// are skinned on the CPU and submitted pre-transformed at the origin. The
+// game's records know, so the kernel reads them and passes them on.
+void publish_shadow_casters(Runtime &rt) {
+    // MGA_NO_SHADOWS stops the scene from being read at all, which is the way
+    // to tell a fault in that read from one anywhere else.
+    static const bool disabled = std::getenv("MGA_NO_SHADOWS") != nullptr;
+    if (disabled) return;
+    if (!media().renderer || !media().renderer->available()) return;
+    static std::vector<gpu::ShadowCaster> casters;
+    const scene::View &view = scene::read(rt);
+    casters.clear();
+    if (view.valid) {
+        // A character's own position sits about half a cell above the surface
+        // it stands on -- at ground level the records read y ~= 985 while the
+        // floor is at 0, and a cell is 2000 units.
+        //
+        // The floor used to be taken from the character's cell instead, which
+        // held only while everyone stood on the stage's base level: a
+        // character up on a platform inside the same cell got a shadow down
+        // at the cell's base, buried inside the platform and invisible. The
+        // character's own height tracks them up and down, so it is used
+        // instead. The cost is that the idle animation moves the shadow with
+        // the breathing, by about twelve units out of two thousand.
+        constexpr float kFootDrop = 1000.0f;
+        constexpr float kRadius = 620.0f;
+        for (const scene::Character &character : view.characters)
+            casters.push_back({character.position, character.position[1] - kFootDrop, kRadius});
+    }
+    media().renderer->set_shadow_casters(view.world_to_clip, casters);
+}
+#endif
+
 void present_frame(Runtime &rt) {
     // Overlays are swapped between frames; re-check before drawing the next one.
     revalidate_overlays(rt);
 #if defined(MGA_HAS_RENDERER)
+    publish_shadow_casters(rt);
     if (!media().renderer || !media().renderer->available()) {
         perf::end_frame(kernel().now_us());
         kernel().calibrate_cpu_scale();
@@ -382,6 +421,7 @@ void register_display_ctrl(HleRegistrar &hle) {
     });
     // The guest flipping the framebuffer is the end of a frame.
     hle.add("sceDisplay", "sceDisplaySetFrameBuf", [](Runtime &rt, AllegrexContext &ctx) {
+        scene::trace(rt);
         if (trace_display()) {
             DisplayTrace &trace = display_trace();
             ++trace.set_frame_buf;
@@ -404,14 +444,17 @@ void register_display_ctrl(HleRegistrar &hle) {
         if (arg(ctx, 2) != 0u) memory.store32(arg(ctx, 2), media().display.pixel_format);
         kernel().finish(ctx, 0u);
     });
-    hle.add("sceDisplay", "sceDisplayWaitVblankStart", [](Runtime &, AllegrexContext &ctx) {
+    hle.add("sceDisplay", "sceDisplayWaitVblankStart", [](Runtime &rt, AllegrexContext &ctx) {
         ++display_trace().vblank_waits;
+        // Once a frame is the right cadence to watch the scene change.
+        scene::trace(rt);
         WaitState wait{};
         wait.type = WaitType::VBlank;
         kernel().block(ctx, wait, 0u);
     });
-    hle.add("sceDisplay", "sceDisplayWaitVblankStartCB", [](Runtime &, AllegrexContext &ctx) {
+    hle.add("sceDisplay", "sceDisplayWaitVblankStartCB", [](Runtime &rt, AllegrexContext &ctx) {
         ++display_trace().vblank_waits;
+        scene::trace(rt);
         (void)kernel().deliver_callbacks();
         WaitState wait{};
         wait.type = WaitType::VBlank;

@@ -1,6 +1,7 @@
 #include "kernel/module_loader.hpp"
 
 #include "kernel/call_watch.hpp"
+#include "kernel/scene.hpp"
 #include "kernel/sound_paths.hpp"
 
 #include "hle/hle_common.hpp"
@@ -325,6 +326,14 @@ const LoadedModule *load_module(Runtime &runtime, std::vector<std::uint8_t> imag
     // And the sound module's file names can be kept alive from here on.
     install_sound_path_keeper(runtime);
     return result;
+}
+
+std::optional<std::uint32_t> module_gp_for_address(std::uint32_t address) {
+    for (const auto &[uid, module] : state().modules) {
+        (void)uid;
+        if (address >= module->base && address < module->base + module->size) return module->gp;
+    }
+    return std::nullopt;
 }
 
 LoadedModule *find_module(SceUID uid) {

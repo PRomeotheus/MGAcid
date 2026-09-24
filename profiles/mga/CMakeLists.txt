@@ -37,8 +37,14 @@ if(MGA_RENDERER)
             COMMAND python3 "${MGA_PROFILE_DIR}/tools/embed_shaders.py" "${MGA_GLSLANG}" "${MGA_SHADER_INC}"
                     "kGeVertexShader=${MGA_PROFILE_DIR}/host/gpu/shaders/ge.vert"
                     "kGeFragmentShader=${MGA_PROFILE_DIR}/host/gpu/shaders/ge.frag"
+                    "kPostVertexShader=${MGA_PROFILE_DIR}/host/gpu/shaders/post.vert"
+                    "kPostFragmentShader=${MGA_PROFILE_DIR}/host/gpu/shaders/post.frag"
+                    "kShadowVertexShader=${MGA_PROFILE_DIR}/host/gpu/shaders/shadow.vert"
             DEPENDS "${MGA_PROFILE_DIR}/host/gpu/shaders/ge.vert"
                     "${MGA_PROFILE_DIR}/host/gpu/shaders/ge.frag"
+                    "${MGA_PROFILE_DIR}/host/gpu/shaders/post.vert"
+                    "${MGA_PROFILE_DIR}/host/gpu/shaders/post.frag"
+                    "${MGA_PROFILE_DIR}/host/gpu/shaders/shadow.vert"
                     "${MGA_PROFILE_DIR}/tools/embed_shaders.py"
             COMMENT "Compiling GE shaders to SPIR-V")
         add_custom_target(mga_shaders DEPENDS "${MGA_SHADER_INC}")
@@ -94,10 +100,13 @@ set(MGA_HOST_SOURCES
     host/audio/sas_core.cpp
     host/gpu/ge_state.cpp
     host/gpu/texture_decode.cpp
+    host/gpu/shadow_map.cpp
+    host/gpu/texture_scale.cpp
     host/perf/frame_stats.cpp
     host/perf/perf_overlay.cpp
     host/overlays.cpp
     host/mga_profile.cpp
+    host/kernel/scene.cpp
     host/kernel/kernel.cpp
     host/kernel/iso_image.cpp
     host/kernel/call_watch.cpp

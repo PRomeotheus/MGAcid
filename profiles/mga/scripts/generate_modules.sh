@@ -82,7 +82,17 @@ if [[ "$stages" != "none" ]]; then
             continue
         fi
         linked="$extract_dir/$stage.linked.prx"
-        "$python" "$link" fromdump "$prx" "$dump" "$linked" > /dev/null
+        # The stage's own archive carries <stage>.rlc: the relocations the game
+        # applies after starting the module, against the executable rather than
+        # against itself. A dump taken from a running game already has them; one
+        # from MGA_SWEEP_MODULES does not, and stage_link.py tells the two apart
+        # rather than guessing.
+        zar="$(dirname "$prx")/_zar"
+        if [[ -f "$zar" ]]; then
+            "$python" "$link" fromdump "$prx" "$dump" "$linked" "$zar" "$stage"
+        else
+            "$python" "$link" fromdump "$prx" "$dump" "$linked" > /dev/null
+        fi
         generate "stage_$stage" "$prx" mgp_stage "$stage_base" "$linked"
     done
     if [[ -n "$missing" ]]; then

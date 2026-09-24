@@ -260,7 +260,9 @@ std::string emit_regular(const psprecomp::DecodedInstruction &d, std::uint32_t p
         else out << "    rt.unsupported(" << psprecomp::hex32(pc) << "u, " << psprecomp::hex32(d.word) << "u, \"unsupported CFC1 control register\"); return;\n";
         break;
     case psprecomp::OpcodeKind::Ctc1:
-        if (d.rd == 31u) out << "    ctx.fcr31 = " << reg(d.rt) << " & 0x0181FFFFu;\n";
+        if (d.rd == 31u)
+            out << "    ctx.fcr31 = " << reg(d.rt) << " & 0x0181FFFFu;\n"
+                << "    apply_host_rounding(ctx.fcr31);\n";
         else out << "    rt.unsupported(" << psprecomp::hex32(pc) << "u, " << psprecomp::hex32(d.word) << "u, \"unsupported CTC1 control register\"); return;\n";
         break;
     case psprecomp::OpcodeKind::AddS:
@@ -1290,7 +1292,7 @@ int generate_manual(const std::filesystem::path &elf_path,
 
     std::ofstream out(output_path);
     if (!out) throw psprecomp::Error("Cannot create generated source");
-    out << "#include \"psprecomp/runtime.hpp\"\n#include <bit>\n#include <cmath>\n#include <cstdint>\n#include <limits>\n\nnamespace psprecomp {\n";
+    out << "#include \"psprecomp/runtime.hpp\"\n#include \"psprecomp/fpu_rounding.hpp\"\n#include <bit>\n#include <cmath>\n#include <cstdint>\n#include <limits>\n\nnamespace psprecomp {\n";
 
     std::vector<GeneratedFunctionInput> generated;
     for (const auto &function : functions) {
@@ -1683,7 +1685,7 @@ int generate_auto(const std::filesystem::path &elf_path,
                  path.filename().string() + ": " + std::to_string(unit.instructions.size()) +
                  " instructions, " + std::to_string(unit.entries.size()) + " entries");
         std::ostringstream out;
-        out << "#include \"psprecomp/runtime.hpp\"\n#include \"" << units_header_name << "\"\n#include <bit>\n#include <cmath>\n#include <cstdint>\n#include <limits>\n\nnamespace psprecomp {\n";
+        out << "#include \"psprecomp/runtime.hpp\"\n#include \"psprecomp/fpu_rounding.hpp\"\n#include \"" << units_header_name << "\"\n#include <bit>\n#include <cmath>\n#include <cstdint>\n#include <limits>\n\nnamespace psprecomp {\n";
         // The register-cache lowering passes (per-basic-block GPR/FPR caches and
         // the cross-unit hot-register cache) are deliberately absent.  They kept
         // large numbers of guest registers live in C++ locals and in a second

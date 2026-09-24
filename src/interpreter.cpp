@@ -3,6 +3,7 @@
 #include "psprecomp/allegrex_context.hpp"
 #include "psprecomp/common.hpp"
 #include "psprecomp/decoder.hpp"
+#include "psprecomp/fpu_rounding.hpp"
 #include "psprecomp/guest_memory.hpp"
 #include "psprecomp/runtime.hpp"
 
@@ -382,6 +383,7 @@ bool execute_simple(Runtime &rt, AllegrexContext &ctx, const DecodedInstruction 
             return false;
         }
         ctx.fcr31 = rt_value & 0x0181FFFFu;
+        apply_host_rounding(ctx.fcr31);
         break;
     case OpcodeKind::AddS: ctx.fpr[d.sa] = ctx.fpr[d.rd] + ctx.fpr[d.rt]; break;
     case OpcodeKind::SubS: ctx.fpr[d.sa] = ctx.fpr[d.rd] - ctx.fpr[d.rt]; break;

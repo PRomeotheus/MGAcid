@@ -1,6 +1,7 @@
 #include "psprecomp/decoder.hpp"
 #include "psprecomp/codegen_policy.hpp"
 #include "psprecomp/elf32.hpp"
+#include "psprecomp/fpu_rounding.hpp"
 #include "psprecomp/guest_memory.hpp"
 #include "psprecomp/interpreter.hpp"
 #include "psprecomp/deflate.hpp"
@@ -1019,6 +1020,25 @@ static std::vector<std::uint8_t> make_relocation_test_prx() {
     return bytes;
 }
 
+// FCR31's RM field has to reach the host FPU. Metal Gear Ac!d sets round-
+// toward-zero at startup and floors negatives with trunc(x - 0.99999994f),
+// which is a correct floor only in that mode: rounding to nearest turns
+// every exact negative integer into one less.
+static void test_fpu_rounding_mode() {
+    // volatile so the subtraction happens at run time, under whichever mode
+    // is in force, rather than being folded at compile time.
+    volatile float z = -22.0f;
+    volatile float one = 0.99999994f;
+
+    psprecomp::apply_host_rounding(1u);  // RM = 1, toward zero
+    const float toward_zero = z - one;
+    require(toward_zero > -23.0f, "Guest round-toward-zero did not reach the host FPU");
+
+    psprecomp::apply_host_rounding(0u);  // RM = 0, to nearest
+    const float to_nearest = z - one;
+    require(to_nearest == -23.0f, "Host FPU did not return to round-to-nearest");
+}
+
 int main() {
     try {
         test_import_return_context_guard();
@@ -1028,6 +1048,7 @@ int main() {
         test_interpreter_unaligned_word_access();
         test_interpreter_hi_lo();
         test_interpreter_floating_point();
+        test_fpu_rounding_mode();
         test_interpreter_dispatch_fallback();
         test_interpreter_budget_and_disable();
 

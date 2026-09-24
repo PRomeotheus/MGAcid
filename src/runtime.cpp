@@ -1,5 +1,6 @@
 #include "psprecomp/runtime.hpp"
 #include "psprecomp/common.hpp"
+#include "psprecomp/fpu_rounding.hpp"
 #include "psprecomp/interpreter.hpp"
 
 #include <algorithm>
@@ -535,6 +536,7 @@ void Runtime::run(std::uint32_t entry, std::uint64_t max_dispatches) {
     stopped_ = false;
     stop_reason_.clear();
     cpu_.pc = entry;
+    apply_host_rounding(cpu_.fcr31);
     load_counted_pcs();
     const bool profile_dispatch = std::getenv("PSPRECOMP_PROFILE_DISPATCH") != nullptr;
     const auto parse_environment_u64 = [](const char *name, std::uint64_t fallback = 0u) {
@@ -1225,6 +1227,11 @@ void Runtime::invoke_native_fast_path(std::uint32_t address, AllegrexContext &ct
 void Runtime::invoke_import_cached(std::uint32_t slot, std::string_view library,
                                    std::uint32_t nid, AllegrexContext &ctx) {
     if (hle_histogram_enabled_) ++hle_histogram_[hle_key(library, nid)];
+    // Code generated before set_fcr31() existed assigns ctx.fcr31 directly, so
+    // the host mode is synced on the import paths as well as at the write. Any
+    // guest that changes it calls an import shortly afterwards, and this path
+    // does real work already, so a compare against the mode in force is free.
+    apply_host_rounding(ctx.fcr31);
 
     const HleFunction *bound = slot < import_bindings_.size() ? import_bindings_[slot] : nullptr;
     if (bound == nullptr) {
@@ -1247,6 +1254,7 @@ void Runtime::invoke_import_cached(std::uint32_t slot, std::string_view library,
 }
 
 void Runtime::invoke_import(std::string_view library, std::uint32_t nid, AllegrexContext &ctx) {
+    apply_host_rounding(ctx.fcr31);  // see invoke_import_cached()
     // PSPRECOMP_HLE_HISTOGRAM distinguishes a genuine synchronous workload from
     // a kernel-wait livelock: real translated work barely calls into the HLE,
     // while a thread spinning on an operation the host never completes shows up

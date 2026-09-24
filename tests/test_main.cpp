@@ -9,6 +9,8 @@
 #include "psprecomp/program_analysis.hpp"
 #include "psprecomp/runtime.hpp"
 #include "psprecomp/sha256.hpp"
+#include "psprecomp/snapshot.hpp"
+#include "psprecomp/state.hpp"
 
 #include <array>
 #include <bit>
@@ -18,6 +20,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <random>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -1071,6 +1074,216 @@ static void test_fpu_rounding_mode() {
     require(to_nearest == -23.0f, "Host FPU did not return to round-to-nearest");
 }
 
+// A save state's byte stream: that every value comes back as it went in, and
+// that a file which is truncated, corrupt or from another build is refused
+// rather than half-applied. The refusals matter more than the round trip --
+// a state that reads as nonsense is how a save corrupts a game.
+static void test_snapshot_stream() {
+    using psprecomp::SnapshotReader;
+    using psprecomp::SnapshotWriter;
+    {
+        const std::string awkward("a\0b", 3);  // the nul is data, not a terminator
+        SnapshotWriter out;
+        out.u8(0xABu);
+        out.u16(0xBEEFu);
+        out.u32(0xDEADBEEFu);
+        out.u64(0x0123456789ABCDEFull);
+        out.i32(-77);
+        out.boolean(true);
+        out.f32(-1234.5678f);
+        out.text(awkward);
+        SnapshotReader in(out.data());
+        require(in.u8() == 0xABu, "Snapshot u8 did not survive");
+        require(in.u16() == 0xBEEFu, "Snapshot u16 did not survive");
+        require(in.u32() == 0xDEADBEEFu, "Snapshot u32 did not survive");
+        require(in.u64() == 0x0123456789ABCDEFull, "Snapshot u64 did not survive");
+        require(in.i32() == -77, "Snapshot i32 lost its sign");
+        require(in.boolean(), "Snapshot bool did not survive");
+        require(in.f32() == -1234.5678f, "Snapshot f32 was not exact");
+        require(in.text() == awkward, "Snapshot text did not survive an embedded nul");
+        require(in.ok() && in.remaining() == 0u, "Snapshot stream was not consumed exactly");
+    }
+    {
+        // Reading past the end fails once and stays failed, so a restore can be
+        // written as straight-line code and checked at the end.
+        SnapshotWriter out;
+        out.u32(1u);
+        SnapshotReader in(out.data());
+        require(in.u32() == 1u && in.ok(), "Snapshot lost a value that was there");
+        (void)in.u32();
+        require(!in.ok(), "Snapshot allowed a read past the end");
+        require(in.u64() == 0u && !in.ok(), "Snapshot recovered from an overrun");
+    }
+    {
+        SnapshotWriter out;
+        out.u32(0xFFFFFFFFu);  // a length no stream could satisfy
+        SnapshotReader in(out.data());
+        require(in.text().empty() && !in.ok(), "Snapshot believed an absurd string length");
+    }
+    // Memory blocks, including the shapes that break a naive run encoder.
+    const auto round_trip = [](std::vector<std::uint8_t> source, const char *what) {
+        SnapshotWriter out;
+        out.memory(source.data(), source.size());
+        std::vector<std::uint8_t> back(source.size(), 0xCDu);
+        SnapshotReader in(out.data());
+        require(in.memory(back.data(), back.size()) && back == source && in.ok() && in.remaining() == 0u, what);
+        return out.size();
+    };
+    round_trip({}, "Snapshot mishandled an empty memory block");
+    round_trip({0, 0, 0, 0}, "Snapshot mishandled a block of zeros");
+    round_trip({1, 2, 3, 4}, "Snapshot mishandled a block with no zeros");
+    round_trip({0, 1, 0, 0, 2, 3, 0}, "Snapshot mishandled a block starting and ending with zero");
+    round_trip({1, 0, 0, 0, 0, 0, 0, 2}, "Snapshot mishandled a long zero run between literals");
+    {
+        // Most of a guest's memory is untouched at any moment, which is the
+        // whole reason zero runs are counted rather than stored.
+        std::vector<std::uint8_t> ram(24u * 1024u * 1024u, 0u);
+        std::mt19937 rng(1234u);
+        for (std::size_t block = 0; block < 64u; ++block) {
+            const std::size_t at = rng() % (ram.size() - 4096u);
+            for (std::size_t i = 0; i < 4096u; ++i) ram[at + i] = static_cast<std::uint8_t>(rng() | 1u);
+        }
+        const std::size_t written = round_trip(ram, "Snapshot mishandled a mostly-empty block");
+        require(written < ram.size() / 20u, "Snapshot stored mostly-empty memory without counting its zeros");
+    }
+    {
+        std::vector<std::uint8_t> source(100u, 7u);
+        SnapshotWriter out;
+        out.memory(source.data(), source.size());
+        std::vector<std::uint8_t> wrong(99u);
+        SnapshotReader in(out.data());
+        require(!in.memory(wrong.data(), wrong.size()) && !in.ok(), "Snapshot accepted a block of the wrong size");
+    }
+    {
+        // A run that claims more bytes than the block holds must be refused
+        // rather than written past the end of the destination.
+        std::vector<std::uint8_t> source(16u, 0u);
+        SnapshotWriter out;
+        out.memory(source.data(), source.size());
+        std::vector<std::uint8_t> bytes = out.data();
+        bytes[8] = 0x7Fu;
+        std::vector<std::uint8_t> back(16u);
+        SnapshotReader in(bytes);
+        require(!in.memory(back.data(), back.size()) && !in.ok(), "Snapshot accepted a run longer than its block");
+    }
+}
+
+// The machine half of a save state: the header's refusals, a context bit for
+// bit, and all three memory regions.
+static void test_save_state_machine() {
+    using psprecomp::AllegrexContext;
+    using psprecomp::GuestMemory;
+    using psprecomp::SnapshotReader;
+    using psprecomp::SnapshotWriter;
+    constexpr std::uint32_t kTag = 0x4D474100u;
+    {
+        SnapshotWriter out;
+        psprecomp::write_state_header(out, kTag, 3u);
+        SnapshotReader match(out.data());
+        require(psprecomp::read_state_header(match, kTag, 3u), "A state refused its own header");
+        SnapshotReader other_profile(out.data());
+        require(!psprecomp::read_state_header(other_profile, 0x54334200u, 3u),
+                "A state from another profile was accepted");
+        SnapshotReader older(out.data());
+        require(!psprecomp::read_state_header(older, kTag, 4u), "A state from an older layout was accepted");
+        const std::vector<std::uint8_t> junk(16u, 0x5Au);
+        SnapshotReader not_a_state(junk);
+        require(!psprecomp::read_state_header(not_a_state, kTag, 3u), "A file that is not a state was accepted");
+    }
+    {
+        AllegrexContext written{};
+        std::mt19937 rng(99u);
+        for (std::size_t i = 1; i < written.gpr.size(); ++i) written.gpr[i] = rng();
+        written.hi = rng();
+        written.lo = rng();
+        written.pc = 0x08804000u;
+        written.fcr31 = 1u;
+        for (std::uint32_t i = 0; i < written.fpr.size(); ++i) written.set_fpr_bits(i, rng());
+        // A signalling NaN and a negative zero: what a decimal round trip loses.
+        written.set_fpr_bits(3u, 0x7FA00001u);
+        written.set_fpr_bits(4u, 0x80000000u);
+        for (float &lane : written.vfpu) lane = static_cast<float>(rng()) / 7.0f;
+        for (std::uint32_t &word : written.vfpu_ctrl) word = rng();
+
+        SnapshotWriter out;
+        psprecomp::write_context(out, written);
+        AllegrexContext back{};
+        SnapshotReader in(out.data());
+        require(psprecomp::read_context(in, back), "A context would not read back");
+        require(back.gpr == written.gpr, "A context lost a general register");
+        require(back.hi == written.hi && back.lo == written.lo && back.pc == written.pc &&
+                    back.fcr31 == written.fcr31,
+                "A context lost hi, lo, pc or fcr31");
+        for (std::uint32_t i = 0; i < written.fpr.size(); ++i)
+            require(back.fpr_bits(i) == written.fpr_bits(i), "A context did not keep a float bit for bit");
+        require(back.vfpu == written.vfpu && back.vfpu_ctrl == written.vfpu_ctrl, "A context lost VFPU state");
+        require(in.ok() && in.remaining() == 0u, "A context was not exactly as long as it said");
+    }
+    {
+        AllegrexContext tampered{};
+        tampered.gpr[0] = 0xFFFFFFFFu;
+        SnapshotWriter out;
+        psprecomp::write_context(out, tampered);
+        AllegrexContext back{};
+        SnapshotReader in(out.data());
+        require(psprecomp::read_context(in, back) && back.gpr[0] == 0u, "A state talked $zero into being non-zero");
+    }
+    {
+        GuestMemory memory(32u * 1024u * 1024u);
+        std::mt19937 rng(7u);
+        // Something in each region, so one silently skipped shows up.
+        for (std::uint32_t i = 0; i < 4096u; ++i)
+            memory.store8(GuestMemory::kPhysicalBase + 0x100000u + i, static_cast<std::uint8_t>(rng() | 1u));
+        for (std::uint32_t i = 0; i < 1024u; ++i)
+            memory.store8(GuestMemory::kVramPhysicalBase + i, static_cast<std::uint8_t>(rng() | 1u));
+        for (std::uint32_t i = 0; i < 256u; ++i)
+            memory.store8(GuestMemory::kScratchpadBase + i, static_cast<std::uint8_t>(rng() | 1u));
+        AllegrexContext context{};
+        context.pc = 0x08900000u;
+        context.gpr[29] = 0x09F00000u;
+        SnapshotWriter out;
+        psprecomp::write_machine(out, memory, context);
+
+        // Restored into a machine that has been scribbled over, so that a
+        // region left untouched shows as the scribble rather than as zeros.
+        GuestMemory other(32u * 1024u * 1024u);
+        for (std::uint32_t i = 0; i < 8192u; ++i) other.store8(GuestMemory::kPhysicalBase + i, 0xA5u);
+        AllegrexContext restored{};
+        SnapshotReader in(out.data());
+        require(psprecomp::read_machine(in, other, restored), "A machine would not read back");
+        require(in.ok() && in.remaining() == 0u, "A machine was not exactly as long as it said");
+        for (std::uint32_t i = 0; i < 4096u; ++i)
+            require(other.load8(GuestMemory::kPhysicalBase + 0x100000u + i) ==
+                        memory.load8(GuestMemory::kPhysicalBase + 0x100000u + i),
+                    "A state lost main RAM");
+        for (std::uint32_t i = 0; i < 1024u; ++i)
+            require(other.load8(GuestMemory::kVramPhysicalBase + i) ==
+                        memory.load8(GuestMemory::kVramPhysicalBase + i),
+                    "A state lost video RAM");
+        for (std::uint32_t i = 0; i < 256u; ++i)
+            require(other.load8(GuestMemory::kScratchpadBase + i) ==
+                        memory.load8(GuestMemory::kScratchpadBase + i),
+                    "A state lost the scratchpad");
+        for (std::uint32_t i = 0; i < 8192u; ++i)
+            require(other.load8(GuestMemory::kPhysicalBase + i) == 0u,
+                    "A state left what it says is empty memory holding what was there before");
+        require(restored.pc == context.pc && restored.gpr[29] == context.gpr[29], "A state lost its context");
+
+        const std::vector<std::uint8_t> cut(out.data().begin(),
+                                            out.data().begin() + static_cast<std::ptrdiff_t>(out.size() / 2u));
+        GuestMemory third(32u * 1024u * 1024u);
+        AllegrexContext ignored{};
+        SnapshotReader broken(cut);
+        require(!psprecomp::read_machine(broken, third, ignored), "Half a state was accepted");
+
+        GuestMemory bigger(64u * 1024u * 1024u);
+        AllegrexContext also_ignored{};
+        SnapshotReader mismatched(out.data());
+        require(!psprecomp::read_machine(mismatched, bigger, also_ignored),
+                "A state for a different memory size was accepted");
+    }
+}
+
 int main() {
     try {
         test_import_return_context_guard();
@@ -1082,6 +1295,8 @@ int main() {
         test_interpreter_hi_lo();
         test_interpreter_floating_point();
         test_fpu_rounding_mode();
+        test_snapshot_stream();
+        test_save_state_machine();
         test_interpreter_dispatch_fallback();
         test_interpreter_budget_and_disable();
 

@@ -122,6 +122,8 @@ add_library(psprecomp_core OBJECT
     src/program_analysis.cpp
     src/runtime.cpp
     src/sha256.cpp
+    src/snapshot.cpp
+    src/state.cpp
 )
 target_include_directories(psprecomp_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_definitions(psprecomp_core PRIVATE

@@ -55,9 +55,10 @@ void print(const Summary &s) {
     char line[320];
     int length = std::snprintf(line, sizeof(line),
                                "[perf] fps %.1f game %.1f speed %.0f%% | frame avg %.1f max %.1f ms | guest %.1f "
-                               "render %.1f wait %.1f ms | lists %.0f/s | %s %ux%u",
+                               "render %.1f wait %.1f (gpu %.1f pacing %.1f) ms | lists %.0f/s | %s %ux%u",
                                s.fps, s.game_fps, s.speed * 100.0, s.frame_avg_ms, s.frame_max_ms, s.guest_ms,
-                               s.render_ms, s.wait_ms, s.lists, s.present_mode.c_str(), s.width, s.height);
+                               s.render_ms, s.wait_ms, s.gpu_ms, s.pacing_ms, s.lists, s.present_mode.c_str(),
+                               s.width, s.height);
     if (s.refresh_hz > 0.0f && length > 0 && static_cast<std::size_t>(length) < sizeof(line))
         length += std::snprintf(line + length, sizeof(line) - length, " %.0fHz", s.refresh_hz);
     if (s.overlay_ms > 0.0 && length > 0 && static_cast<std::size_t>(length) < sizeof(line))
@@ -146,7 +147,9 @@ void end_frame(std::uint64_t virtual_us) {
     out.frame_avg_ms = s.frame_sum_ms / frames;
     out.frame_max_ms = s.frame_max_ms;
     const double gpu_wait_ms = to_ms(s.wait_sum) / frames;
-    out.wait_ms = gpu_wait_ms + to_ms(s.pacing_sum) / frames;
+    out.gpu_ms = gpu_wait_ms;
+    out.pacing_ms = to_ms(s.pacing_sum) / frames;
+    out.wait_ms = gpu_wait_ms + out.pacing_ms;
     // GPU waits happen inside the timed render calls; count them once. Pacing
     // happens outside them, so subtracting it too hid the render time
     // whenever the game was ahead of real time.

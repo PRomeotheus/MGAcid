@@ -917,4 +917,19 @@ void register_adhoc(HleRegistrar &hle) {
     register_netconf(hle);
 }
 
+
+// ---------------------------------------------------------------------------
+// Save states
+
+std::string why_no_adhoc_state() {
+    // Multiplayer. A state cannot carry an open socket or the other player, and
+    // putting one side of a session back to an earlier moment would desynchronise
+    // it even if it could.
+    const State &s = state();
+    if (s.netconf.dialog.active()) return "the network setup is open";
+    if (!s.pdp.empty() || !s.ptp.empty()) return "an ad hoc connection is open";
+    if (s.adhoc_initialized || s.ctl_initialized) return "ad hoc multiplayer is running";
+    return {};
+}
+
 } // namespace mga

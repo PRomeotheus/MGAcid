@@ -2,8 +2,8 @@
 
 #include "shadow_map.hpp"
 #include "texture_decode.hpp"
-#include "texture_pack.hpp"
-#include "texture_scale.hpp"
+#include "common/texture_pack.hpp"
+#include "common/texture_scale.hpp"
 
 #include "install/user_data.hpp"
 #include "perf/frame_stats.hpp"
@@ -32,6 +32,15 @@
 #include <vector>
 
 namespace mga::gpu {
+
+// Shared with the other profiles. These two live in profiles/common because
+// nothing in them is specific to a game -- one reads replacement textures from a
+// folder, the other enlarges a decoded one -- so they keep a neutral namespace
+// and are named here rather than copied per profile.
+using psp::gpu::PackedTexture;
+using psp::gpu::scale_texture;
+using psp::gpu::TexturePack;
+using psp::gpu::TextureScaleMode;
 namespace {
 
 constexpr std::uint32_t kPspWidth = 480u;
@@ -57,6 +66,20 @@ struct PushConstants {
 static_assert(sizeof(PushConstants) == 128u, "PushConstants must fit the guaranteed push constant size");
 constexpr float kPushFog = 1.0f;
 constexpr float kPushLighting = 2.0f;
+// This draw is itself a shadow and must not be shadowed again.
+//
+// The blob discs are the only thing that sets it. A blob lies on the ground
+// directly beneath the character that casts it, so the character is always
+// between it and the light: sampled against the shadow map the blob is always
+// blocked, and gets darkened on top of the darkening it already is. Worse, how
+// much depends on the soft-shadow penumbra, which is measured from the gap
+// between caster and receiver and therefore changes every time the character
+// moves -- so the blob does not merely come out too dark, it flickers.
+//
+// None of this was visible until cast shadows started working properly. While
+// the blobs were dragging the light's box out to tens of thousands of units
+// there was no cast shadow to speak of, so there was nothing to darken them.
+constexpr float kPushNoShadow = 4.0f;
 
 // What the post-processing pass needs: where the game rectangle sits inside
 // the window, the scene target's texel size for neighbour taps, and which
@@ -72,9 +95,31 @@ struct PostPush {
 };
 static_assert(sizeof(PostPush) == 48u, "PostPush must match the post shader's push block");
 
+// The ambient occlusion pass reads depth and nothing else, so it needs neither
+// the letterbox rectangle nor the effect flags.
+struct AoPush {
+    std::array<float, 2> texel{};
+    // A vec4 in a push block is 16-byte aligned, so `depth` begins at 16 and the
+    // block is 32 bytes -- not the 24 a tightly packed structure gives.
+    //
+    // PostPush above needs no such marker only by accident: its two vec2s happen
+    // to fill the gap before its vec4. Dropping them here removed the padding
+    // and, with it, the agreement. So the alignment is stated rather than left
+    // to arithmetic, and asserted at the offset as well as the size -- a size
+    // that matches by luck would otherwise still pass.
+    alignas(16) std::array<float, 4> depth{};
+};
+static_assert(sizeof(AoPush) == 32u, "AoPush must match ao.frag's push block");
+static_assert(offsetof(AoPush, depth) == 16u, "ao.frag reads depth at offset 16");
+
 // Descriptor sets the post pass needs: one per render target it samples, and
 // there are only ever a handful of targets.
 constexpr std::size_t kMaxPostSets = 8u;
+// The same, for the ambient occlusion pass: one set per target it has shaded.
+// Counted into the pool below rather than taken from its slack, because the pool
+// is sized to exactly what its other users can reach, so an uncounted set is one
+// the pool may not have when a full texture cache has claimed the rest.
+constexpr std::size_t kMaxAoSets = 8u;
 
 struct GpuVertex {
     float x{}, y{}, z{}, w{1.0f};
@@ -191,9 +236,12 @@ struct EnvironmentBlock {
     // y: which light casts, z: one shadow map texel, w: depth bias.
     std::array<float, 16> shadow_transform{};
     std::array<float, 4> shadow_params{};
+    // x: how fast a shadow softens with the gap between caster and surface;
+    // y: the widest it may spread, in texels.
+    std::array<float, 4> shadow_shape{};
 };
 
-static_assert(sizeof(EnvironmentBlock) == 576u, "EnvironmentBlock must match the std140 layout in ge.vert");
+static_assert(sizeof(EnvironmentBlock) == 592u, "EnvironmentBlock must match the std140 layout in ge.vert");
 
 // What a lit draw adds: its world matrix and material. Consecutive draws of
 // one mesh share it, so it is written only when it differs from the last one.
@@ -321,6 +369,16 @@ VkCompareOp to_compare_op(std::uint32_t function) {
 // itself. The light's box spans tens of thousands of units, so this is a few
 // tens of units of slack -- well under one grid cell.
 constexpr float kShadowBias = 0.0015f;
+
+// How fast a shadow's edge widens with the gap between whatever casts it and
+// whatever it lands on. The light's box is tens of thousands of units across
+// and its depth is normalised over that, so a character standing a metre off
+// the ground is a small fraction -- this turns that fraction into a blur
+// measured in shadow map texels.
+constexpr float kShadowSoftness = 900.0f;
+// And the widest that blur may get. Without a cap a caster far above the floor
+// smears its shadow across the whole scene as a grey wash.
+constexpr float kShadowMaxRadiusTexels = 12.0f;
 
 std::array<float, 16> multiply(const std::array<float, 16> &a, const std::array<float, 16> &b) {
     std::array<float, 16> result{};
@@ -538,7 +596,7 @@ struct VulkanRenderer::Impl {
     // above the 480x272 that hid it.
     bool smooth_textures{};
     // Replacement textures from a pack, and the dumps that let someone make
-    // them; see gpu/texture_pack.hpp.
+    // them; see common/texture_pack.hpp.
     TexturePack texture_pack;
     bool texture_pack_enabled{};
     // Decoded textures are upscaled by this factor before upload, so they
@@ -573,6 +631,7 @@ struct VulkanRenderer::Impl {
     bool post_enabled{};
     bool post_fxaa{};
     float post_ao{};
+    float post_grade{};
     // Blob shadows. The casters come from the kernel, which reads them out of
     // the game's records; the renderer only draws them.
     float blob_strength{};
@@ -613,6 +672,9 @@ struct VulkanRenderer::Impl {
     bool shadow_transform_valid{};
     std::vector<ShadowCaster> shadow_casters;
     bool blobs_drawn{};
+    // Set while the blob discs go through submit(), so the caster gate can tell
+    // them from the geometry they stand in for.
+    bool drawing_blobs{};
     // Enough of the last transformed draw to put a blob into the same space:
     // the scene's matrices, its viewport and the target it went to. Copying
     // the whole DrawCall every draw would mean copying its vertices with it.
@@ -651,6 +713,34 @@ struct VulkanRenderer::Impl {
     }
     [[nodiscard]] VkDescriptorSet post_descriptor_for(VkImageView color, VkImageView depth);
     void record_post(VkImageView color, VkImageView depth, std::uint32_t image_index);
+
+    // Ambient occlusion, drawn into the scene target at the seam between the
+    // world and the interface rather than onto the finished frame. See ao.frag
+    // for why that seam is the only place it can go.
+    //
+    // Its own render pass, because the pass the scene is drawn with binds the
+    // depth image as an attachment and an attachment cannot also be sampled.
+    // This one names the colour attachment alone, so the depth image is free to
+    // be read as a texture for the length of the pass.
+    VkRenderPass ao_render_pass{};
+    VkShaderModule ao_vertex_shader{};
+    VkShaderModule ao_fragment_shader{};
+    VkDescriptorSetLayout ao_set_layout{};
+    VkPipelineLayout ao_pipeline_layout{};
+    VkPipeline ao_pipeline{};
+    // Keyed by the target's own views, and dropped with the target: a
+    // destroyed view's handle value can be handed back to a later one.
+    std::map<VkImageView, VkFramebuffer> ao_framebuffers;
+    std::map<VkImageView, VkDescriptorSet> ao_descriptors;
+    // Whether this frame has passed the seam, and whether the pass actually
+    // ran there -- a frame that draws 3D and flips without ever drawing a flat
+    // one never reaches the seam, and falls back to the post pass.
+    bool ao_seam_passed{};
+    bool ao_in_scene{};
+    bool create_ao_pipeline(std::string &error);
+    void drop_ao_resources();
+    [[nodiscard]] bool ao_available() const noexcept { return ao_pipeline != VK_NULL_HANDLE; }
+    [[nodiscard]] VkDescriptorSet ao_descriptor_for(VkImageView depth);
 
     // Window capture: the presented image is copied here and written after
     // its frame completes.
@@ -726,6 +816,10 @@ struct VulkanRenderer::Impl {
         std::uint32_t extent_y{};
     };
     std::map<std::uint32_t, Target> targets;
+    // Declared here rather than with the rest of the ambient occlusion members
+    // above, because they take a Target and it is only complete from here.
+    [[nodiscard]] VkFramebuffer ao_framebuffer_for(const Target &target);
+    void record_scene_ao(Target &target);
     // Write-back of the displayed framebuffer to guest VRAM (write_back_frame):
     // present() scales the target to 480x272 and copies it into a mapped
     // buffer; begin_frame(), after the frame fence, takes the pixels; the next
@@ -820,6 +914,29 @@ struct VulkanRenderer::Impl {
     VkDescriptorSetLayout lighting_layout{};
     VkDescriptorSet lighting_descriptor{};  // binding 0: environment, binding 1: object
     VkDeviceSize uniform_alignment{256u};
+    // Vertices and uniform blocks share one arena, and when it runs out a draw
+    // is dropped -- silently, until now. That is invisible on screen except as
+    // something missing for one frame, which is exactly what a flicker is, so
+    // the three places that can drop a draw say so and the high-water mark is
+    // reported with the rest of the frame's numbers.
+    VkDeviceSize peak_vertex_offset{};
+    std::uint64_t dropped_draws{};
+    // What the blob seam decided. A blob that is simply not drawn on some
+    // frames looks exactly like a blob that is drawn wrongly, and the two want
+    // opposite fixes, so the seam counts which happened rather than leaving it
+    // to be inferred from the screen.
+    std::uint64_t blob_frames{};       // the seam was reached and blobs were drawn
+    std::uint64_t blob_no_casters{};   // reached, but the scene offered no characters
+    std::uint64_t blob_no_transform{}; // reached, but no world-to-clip had been published
+    void note_drop(const char *where) {
+        ++dropped_draws;
+        static bool reported = false;
+        if (!reported) {
+            reported = true;
+            std::cout << "[render] the vertex arena is full (" << where << "); draws are being dropped. "
+                      << "Everything after this in the frame is missing from it.\n";
+        }
+    }
     VkSampler sampler{};        // linear
     VkSampler sharp_sampler{};  // nearest, for the sharp texture setting
     VkSampler mip_sampler{};    // trilinear + anisotropic, for smooth textures
@@ -858,6 +975,13 @@ struct VulkanRenderer::Impl {
         offset = static_cast<std::uint32_t>(at);
         vertex_offset = at + size;
         return true;
+    }
+    // Textures evicted while a frame was being recorded. Destroyed at the top of
+    // the next frame, once its fence says the frame that referenced them is done.
+    std::vector<Texture> retired_textures;
+    void destroy_retired_textures() {
+        for (Texture &texture : retired_textures) destroy_texture(texture);
+        retired_textures.clear();
     }
     void forget_bindings() {
         bound_pipeline = VK_NULL_HANDLE;
@@ -987,15 +1111,38 @@ struct VulkanRenderer::Impl {
         VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
         allocate.allocationSize = requirements.size;
         allocate.memoryTypeIndex = find_memory_type(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        if (!check(vkAllocateMemory(device, &allocate, nullptr, &memory), "vkAllocateMemory", error)) return false;
+        if (!check(vkAllocateMemory(device, &allocate, nullptr, &memory), "vkAllocateMemory", error)) {
+            // The image outlived the allocation that failed. Left behind it would
+            // be unreachable: callers that get false discard every handle, so
+            // nothing would ever destroy it.
+            vkDestroyImage(device, image, nullptr);
+            image = VK_NULL_HANDLE;
+            return false;
+        }
         vkBindImageMemory(device, image, memory, 0u);
 
+        // A view is only legal on an image whose usage can carry one. Two images
+        // here -- the write-back and upload staging images -- are transfer only,
+        // and a view on those is a specification violation the layers report, for
+        // a view nothing ever reads.
+        constexpr VkImageUsageFlags kViewable =
+            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT;
+        if ((usage & kViewable) == 0u) {
+            view = VK_NULL_HANDLE;
+            return true;
+        }
         VkImageViewCreateInfo view_info{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
         view_info.image = image;
         view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
         view_info.format = format;
         view_info.subresourceRange = {aspect, 0u, mip_levels, 0u, 1u};
-        return check(vkCreateImageView(device, &view_info, nullptr, &view), "vkCreateImageView", error);
+        if (check(vkCreateImageView(device, &view_info, nullptr, &view), "vkCreateImageView", error)) return true;
+        vkFreeMemory(device, memory, nullptr);
+        vkDestroyImage(device, image, nullptr);
+        memory = VK_NULL_HANDLE;
+        image = VK_NULL_HANDLE;
+        return false;
     }
 
     void transition(VkCommandBuffer commands, VkImage image, VkImageLayout from, VkImageLayout to,
@@ -1088,6 +1235,7 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
     impl.post_enabled = player.post_process;
     impl.post_fxaa = player.fxaa;
     impl.post_ao = std::clamp(player.contact_shadows, 0.0f, 1.0f);
+    impl.post_grade = std::clamp(player.colour_grade, 0.0f, 1.0f);
     impl.blob_strength = std::clamp(player.blob_shadows, 0.0f, 1.0f);
     impl.shadow_strength = std::clamp(player.shadow_maps, 0.0f, 1.0f);
     impl.texture_pack_enabled = player.texture_pack;
@@ -1320,14 +1468,18 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
 
     const std::array<VkDescriptorPoolSize, 2> pool_sizes{
         VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                             // Two per post set, not one: its layout binds the
+                             // finished colour and the depth it was drawn with.
+                             // maxSets below counts sets, this counts descriptors,
+                             // and the two agree only for a one-binding layout.
                              static_cast<std::uint32_t>(kMaxCachedTextures + 1u + kMaxFramebufferTextureSets +
-                                                        kMaxPostSets + 1u)},
+                                                        2u * kMaxPostSets + kMaxAoSets + 1u)},
         VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 2u},
     };
     VkDescriptorPoolCreateInfo pool_info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     pool_info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-    pool_info.maxSets =
-        static_cast<std::uint32_t>(kMaxCachedTextures + 2u + kMaxFramebufferTextureSets + kMaxPostSets);
+    pool_info.maxSets = static_cast<std::uint32_t>(kMaxCachedTextures + 2u + kMaxFramebufferTextureSets +
+                                                    kMaxPostSets + kMaxAoSets);
     pool_info.poolSizeCount = static_cast<std::uint32_t>(pool_sizes.size());
     pool_info.pPoolSizes = pool_sizes.data();
     if (!check(vkCreateDescriptorPool(impl.device, &pool_info, nullptr, &impl.descriptor_pool),
@@ -1359,6 +1511,17 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
         error.clear();
     } else if (!impl.create_post_framebuffers(error)) {
         std::cout << "[render] post-processing unavailable: " << error << "\n";
+        error.clear();
+    }
+
+    // Ambient occlusion in the scene. Independent of the post pass -- it draws
+    // into the game's own target, not the swapchain -- so it works with the
+    // post pass switched off, which is why it is built separately.
+    static const bool no_scene_ao = std::getenv("MGA_NO_SCENE_AO") != nullptr;
+    if (no_scene_ao) {
+        std::cout << "[render] ambient occlusion in the scene disabled by MGA_NO_SCENE_AO\n";
+    } else if (!impl.create_ao_pipeline(error)) {
+        std::cout << "[render] ambient occlusion falls back to the post pass: " << error << "\n";
         error.clear();
     }
 
@@ -1607,8 +1770,25 @@ bool VulkanRenderer::Impl::create_swapchain(std::string &error) {
     swapchain_extent = extent;
     present_mode = wanted_present_mode();
 
-    std::uint32_t image_count =
-        std::max(capabilities.minImageCount, present_mode == VK_PRESENT_MODE_MAILBOX_KHR ? 3u : 2u);
+    // Three images, not two, even for FIFO.
+    //
+    // With two, one is on screen and one is queued, and the next acquire cannot
+    // return until the displayed one is released at the vblank. Any frame whose
+    // round trip crosses a refresh boundary therefore serialises to one frame
+    // per TWO vblanks -- the display is never left without something to show, so
+    // nothing looks broken, the rate just halves and stays there.
+    //
+    // That is what was holding this at 30: a frame's real work is about 11 ms
+    // against a 16.6 ms refresh, with 22 ms of the remaining time spent blocked
+    // waiting to acquire. The guest followed it down, because emulated time is
+    // held to real time, so a 33 ms frame let two vblanks pass and the game
+    // counted one of its own frames per two -- which is why it looked like the
+    // game was choosing 30 rather than being pushed there.
+    //
+    // A third image gives the CPU somewhere to draw while one is displayed and
+    // one is queued. It costs one image's memory and, at worst, one frame of
+    // latency in the case where the queue is full.
+    std::uint32_t image_count = std::max(capabilities.minImageCount, 3u);
     if (capabilities.maxImageCount != 0u) image_count = std::min(image_count, capabilities.maxImageCount);
     // Transfer source only where offered: it is just for window captures.
     swapchain_usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
@@ -1874,6 +2054,272 @@ void VulkanRenderer::Impl::bind_shadow_map() {
     shadow_bound_view = wanted;
 }
 
+bool VulkanRenderer::Impl::create_ao_pipeline(std::string &error) {
+    // One colour attachment, loaded and stored: this pass darkens what is
+    // already in the target and leaves everything else alone. It stays in
+    // COLOR_ATTACHMENT_OPTIMAL throughout, because the scene pass resumes on
+    // the same image straight afterwards.
+    VkAttachmentDescription attachment{};
+    attachment.format = VK_FORMAT_R8G8B8A8_UNORM;
+    attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    attachment.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    attachment.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    VkAttachmentReference reference{0u, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkSubpassDescription subpass{};
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 1u;
+    subpass.pColorAttachments = &reference;
+    // The scene's colour writes have to be finished before this pass blends
+    // over them, and its depth writes before this pass samples them. Each
+    // access bit is paired with a stage that can perform it.
+    std::array<VkSubpassDependency, 3> dependencies{};
+    dependencies[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+    dependencies[0].dstSubpass = 0u;
+    dependencies[0].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependencies[0].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    dependencies[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependencies[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT;
+    dependencies[1].srcSubpass = VK_SUBPASS_EXTERNAL;
+    dependencies[1].dstSubpass = 0u;
+    dependencies[1].srcStageMask = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+    dependencies[1].srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    dependencies[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    dependencies[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    // And the way out. Without this the only dependency leaving the pass is the
+    // implicit one, which makes these colour writes available but never visible:
+    // its destination access mask is empty, and the scene pass resuming on the
+    // same image has an implicit incoming dependency whose source mask is empty
+    // too, so the two never join into a memory dependency.
+    //
+    // The barrier after this pass does not cover it either -- that barrier names
+    // the depth image, and an image memory barrier reaches only the subresources
+    // it lists. On a tiling GPU the darkened colour is resolved out of tile
+    // memory unordered against the resumed pass loading it back in, and the
+    // occlusion disappears wherever the 2D that follows happens to land.
+    dependencies[2].srcSubpass = 0u;
+    dependencies[2].dstSubpass = VK_SUBPASS_EXTERNAL;
+    dependencies[2].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependencies[2].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    dependencies[2].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependencies[2].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT;
+    VkRenderPassCreateInfo pass_info{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+    pass_info.attachmentCount = 1u;
+    pass_info.pAttachments = &attachment;
+    pass_info.subpassCount = 1u;
+    pass_info.pSubpasses = &subpass;
+    pass_info.dependencyCount = static_cast<std::uint32_t>(dependencies.size());
+    pass_info.pDependencies = dependencies.data();
+    if (!check(vkCreateRenderPass(device, &pass_info, nullptr, &ao_render_pass), "vkCreateRenderPass", error))
+        return false;
+
+    const auto create_shader = [&](const std::uint32_t *code, std::size_t size, VkShaderModule &module) {
+        VkShaderModuleCreateInfo info{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+        info.codeSize = size;
+        info.pCode = code;
+        return check(vkCreateShaderModule(device, &info, nullptr, &module), "vkCreateShaderModule", error);
+    };
+    // The same fullscreen triangle the post pass uses, in a module of its own so
+    // this pipeline does not depend on that one having been built.
+    if (!create_shader(kPostVertexShader, sizeof(kPostVertexShader), ao_vertex_shader)) return false;
+    if (!create_shader(kAoFragmentShader, sizeof(kAoFragmentShader), ao_fragment_shader)) return false;
+
+    VkDescriptorSetLayoutBinding binding{};
+    binding.binding = 0u;
+    binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    binding.descriptorCount = 1u;
+    binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    VkDescriptorSetLayoutCreateInfo layout_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    layout_info.bindingCount = 1u;
+    layout_info.pBindings = &binding;
+    if (!check(vkCreateDescriptorSetLayout(device, &layout_info, nullptr, &ao_set_layout),
+               "vkCreateDescriptorSetLayout", error))
+        return false;
+
+    VkPushConstantRange push_range{VK_SHADER_STAGE_FRAGMENT_BIT, 0u, sizeof(AoPush)};
+    VkPipelineLayoutCreateInfo pipeline_layout_info{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    pipeline_layout_info.setLayoutCount = 1u;
+    pipeline_layout_info.pSetLayouts = &ao_set_layout;
+    pipeline_layout_info.pushConstantRangeCount = 1u;
+    pipeline_layout_info.pPushConstantRanges = &push_range;
+    if (!check(vkCreatePipelineLayout(device, &pipeline_layout_info, nullptr, &ao_pipeline_layout),
+               "vkCreatePipelineLayout", error))
+        return false;
+
+    std::array<VkPipelineShaderStageCreateInfo, 2> stages{};
+    stages[0] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = ao_vertex_shader;
+    stages[0].pName = "main";
+    stages[1] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = ao_fragment_shader;
+    stages[1].pName = "main";
+
+    VkPipelineVertexInputStateCreateInfo vertex_input{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    VkPipelineInputAssemblyStateCreateInfo assembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+    assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    VkPipelineViewportStateCreateInfo viewport_state{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+    viewport_state.viewportCount = 1u;
+    viewport_state.scissorCount = 1u;
+    VkPipelineRasterizationStateCreateInfo raster{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+    raster.polygonMode = VK_POLYGON_MODE_FILL;
+    raster.cullMode = VK_CULL_MODE_NONE;
+    raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    raster.lineWidth = 1.0f;
+    VkPipelineMultisampleStateCreateInfo multisample{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+    multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    // No depth state: the pass names no depth attachment, and writing depth
+    // here would corrupt the buffer the very next draw tests against.
+    VkPipelineDepthStencilStateCreateInfo depth{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+    // A multiply. The shader hands over the light that survives, so the target
+    // keeps what was drawn into it, scaled down where the depth says a crease
+    // is -- which is how this pass needs no copy of the colour it darkens.
+    // Alpha is left alone, because the game reads some targets back.
+    VkPipelineColorBlendAttachmentState blend{};
+    blend.blendEnable = VK_TRUE;
+    blend.srcColorBlendFactor = VK_BLEND_FACTOR_DST_COLOR;
+    blend.dstColorBlendFactor = VK_BLEND_FACTOR_ZERO;
+    blend.colorBlendOp = VK_BLEND_OP_ADD;
+    blend.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+    blend.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    blend.alphaBlendOp = VK_BLEND_OP_ADD;
+    blend.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT;
+    VkPipelineColorBlendStateCreateInfo blending{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+    blending.attachmentCount = 1u;
+    blending.pAttachments = &blend;
+    const std::array<VkDynamicState, 2> dynamic_states{VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dynamic{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+    dynamic.dynamicStateCount = static_cast<std::uint32_t>(dynamic_states.size());
+    dynamic.pDynamicStates = dynamic_states.data();
+
+    VkGraphicsPipelineCreateInfo info{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+    info.stageCount = static_cast<std::uint32_t>(stages.size());
+    info.pStages = stages.data();
+    info.pVertexInputState = &vertex_input;
+    info.pInputAssemblyState = &assembly;
+    info.pViewportState = &viewport_state;
+    info.pRasterizationState = &raster;
+    info.pMultisampleState = &multisample;
+    info.pDepthStencilState = &depth;
+    info.pColorBlendState = &blending;
+    info.pDynamicState = &dynamic;
+    info.layout = ao_pipeline_layout;
+    info.renderPass = ao_render_pass;
+    return check(vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1u, &info, nullptr, &ao_pipeline),
+                 "vkCreateGraphicsPipelines", error);
+}
+
+void VulkanRenderer::Impl::drop_ao_resources() {
+    if (ao_framebuffers.empty() && ao_descriptors.empty()) return;
+    // Rare -- a target rebuilt, or the internal resolution changed -- so
+    // waiting is cheaper than tracking which frame last used each one.
+    vkDeviceWaitIdle(device);
+    for (auto &[view, framebuffer] : ao_framebuffers) {
+        (void)view;
+        vkDestroyFramebuffer(device, framebuffer, nullptr);
+    }
+    ao_framebuffers.clear();
+    for (auto &[view, set] : ao_descriptors) {
+        (void)view;
+        if (set != VK_NULL_HANDLE) vkFreeDescriptorSets(device, descriptor_pool, 1u, &set);
+    }
+    ao_descriptors.clear();
+}
+
+VkFramebuffer VulkanRenderer::Impl::ao_framebuffer_for(const Target &target) {
+    if (target.color_view == VK_NULL_HANDLE) return VK_NULL_HANDLE;
+    const auto found = ao_framebuffers.find(target.color_view);
+    if (found != ao_framebuffers.end()) return found->second;
+    VkFramebufferCreateInfo info{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+    info.renderPass = ao_render_pass;
+    info.attachmentCount = 1u;
+    info.pAttachments = &target.color_view;
+    info.width = target_extent.width;
+    info.height = target_extent.height;
+    info.layers = 1u;
+    VkFramebuffer framebuffer = VK_NULL_HANDLE;
+    if (vkCreateFramebuffer(device, &info, nullptr, &framebuffer) != VK_SUCCESS) return VK_NULL_HANDLE;
+    ao_framebuffers.emplace(target.color_view, framebuffer);
+    return framebuffer;
+}
+
+VkDescriptorSet VulkanRenderer::Impl::ao_descriptor_for(VkImageView depth) {
+    if (depth == VK_NULL_HANDLE) return VK_NULL_HANDLE;
+    const auto found = ao_descriptors.find(depth);
+    if (found != ao_descriptors.end()) return found->second;
+    // Bounded like the post pass's, so a game that cycles through targets cannot
+    // spend the pool a set at a time. Dropping them all costs one rebuild.
+    if (ao_descriptors.size() >= kMaxAoSets) drop_ao_resources();
+    VkDescriptorSetAllocateInfo allocate{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    allocate.descriptorPool = descriptor_pool;
+    allocate.descriptorSetCount = 1u;
+    allocate.pSetLayouts = &ao_set_layout;
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    if (vkAllocateDescriptorSets(device, &allocate, &set) != VK_SUCCESS) return VK_NULL_HANDLE;
+    // Sharp and clamped: the taps are at pixel centres and a tap that runs off
+    // the edge has to read the edge rather than wrap to the far side.
+    const VkDescriptorImageInfo image{clamp_sharp_sampler, depth, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    write.dstSet = set;
+    write.dstBinding = 0u;
+    write.descriptorCount = 1u;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    write.pImageInfo = &image;
+    vkUpdateDescriptorSets(device, 1u, &write, 0u, nullptr);
+    ao_descriptors.emplace(depth, set);
+    return set;
+}
+
+// Called at the seam: the world is finished, the interface has not started.
+// Ends the scene pass, reads the depth the world left, multiplies the occlusion
+// into the colour, and puts the depth image back the way the scene pass found
+// it. The caller reopens the scene pass for the flat draws.
+void VulkanRenderer::Impl::record_scene_ao(Target &target) {
+    if (!ao_available() || target.depth_view == VK_NULL_HANDLE) return;
+    const VkFramebuffer framebuffer = ao_framebuffer_for(target);
+    const VkDescriptorSet set = ao_descriptor_for(target.depth_view);
+    if (framebuffer == VK_NULL_HANDLE || set == VK_NULL_HANDLE) return;
+
+    end_pass();
+    transition(command_buffer, target.depth, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+
+    AoPush push{};
+    push.texel = {1.0f / static_cast<float>(std::max(target_extent.width, 1u)),
+                  1.0f / static_cast<float>(std::max(target_extent.height, 1u))};
+    // The tap radius follows the internal resolution, so the crease keeps the
+    // same width on screen however far the target is scaled up.
+    const float radius = std::max(1.5f, static_cast<float>(target_extent.height) / 272.0f * 1.5f);
+    push.depth = {depth_reversed ? 1.0f : -1.0f, radius, depth_reversed ? 0.0f : 1.0f, post_ao};
+
+    VkRenderPassBeginInfo pass{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+    pass.renderPass = ao_render_pass;
+    pass.framebuffer = framebuffer;
+    pass.renderArea = {{0, 0}, target_extent};
+    vkCmdBeginRenderPass(command_buffer, &pass, VK_SUBPASS_CONTENTS_INLINE);
+    const VkViewport viewport{0.0f, 0.0f, static_cast<float>(target_extent.width),
+                              static_cast<float>(target_extent.height), 0.0f, 1.0f};
+    vkCmdSetViewport(command_buffer, 0u, 1u, &viewport);
+    const VkRect2D scissor{{0, 0}, target_extent};
+    vkCmdSetScissor(command_buffer, 0u, 1u, &scissor);
+    vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, ao_pipeline);
+    vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, ao_pipeline_layout, 0u, 1u, &set, 0u,
+                            nullptr);
+    vkCmdPushConstants(command_buffer, ao_pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0u, sizeof(push), &push);
+    vkCmdDraw(command_buffer, 3u, 1u, 0u, 0u);
+    vkCmdEndRenderPass(command_buffer);
+
+    transition(command_buffer, target.depth, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+               VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+    // The scene pipeline and its bindings are no longer current.
+    forget_bindings();
+    ao_in_scene = true;
+}
+
 void VulkanRenderer::Impl::drop_post_descriptors() {
     if (post_descriptors.empty()) return;
     // Rare -- a settings change or a target being rebuilt -- so waiting is
@@ -1952,14 +2398,17 @@ void VulkanRenderer::Impl::record_post(VkImageView color, VkImageView depth, std
     }
     push.texel = {1.0f / static_cast<float>(std::max(target_extent.width, 1u)),
                   1.0f / static_cast<float>(std::max(target_extent.height, 1u))};
-    push.effects = {post_fxaa ? 1.0f : 0.0f, 0.0f};
+    push.effects = {post_fxaa ? 1.0f : 0.0f, post_grade};
     // With a reversed range the buffer holds 0 at the far plane and a larger
     // value means nearer; with the ordinary range it is the other way round.
     // The tap radius follows the internal resolution so the shadow keeps the
     // same size on screen however far the render target is scaled up.
     const float radius = std::max(1.5f, static_cast<float>(target_extent.height) / 272.0f * 1.5f);
-    push.depth = {depth_reversed ? 1.0f : -1.0f, radius, depth_reversed ? 0.0f : 1.0f,
-                  depth != VK_NULL_HANDLE ? post_ao : 0.0f};
+    // Only where the scene pass did not run. A frame that draws 3D and flips
+    // without ever drawing a flat one never reaches the seam, and that frame
+    // has no interface to bleed onto, so doing it here is right for it.
+    const bool ao_here = depth != VK_NULL_HANDLE && !ao_in_scene;
+    push.depth = {depth_reversed ? 1.0f : -1.0f, radius, depth_reversed ? 0.0f : 1.0f, ao_here ? post_ao : 0.0f};
 
     VkRenderPassBeginInfo pass{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     pass.renderPass = post_render_pass;
@@ -2184,6 +2633,9 @@ void VulkanRenderer::Impl::destroy_target(Target &target) {
     // and a later view can be handed back the same handle value.
     if (target.color_view != VK_NULL_HANDLE && post_descriptors.count(target.color_view) != 0u)
         drop_post_descriptors();
+    if ((target.color_view != VK_NULL_HANDLE && ao_framebuffers.count(target.color_view) != 0u) ||
+        (target.depth_view != VK_NULL_HANDLE && ao_descriptors.count(target.depth_view) != 0u))
+        drop_ao_resources();
     for (VkDescriptorSet &descriptor : target.copy_descriptors)
         if (descriptor != VK_NULL_HANDLE) vkFreeDescriptorSets(device, descriptor_pool, 1u, &descriptor);
     vkDestroyImageView(device, target.copy_opaque_view, nullptr);
@@ -2348,17 +2800,34 @@ VulkanRenderer::Impl::Texture VulkanRenderer::Impl::create_texture(std::uint32_t
     VkBufferCreateInfo buffer_info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     buffer_info.size = bytes;
     buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-    vkCreateBuffer(device, &buffer_info, nullptr, &staging);
+    // Checked, unlike most allocations here, because these are the ones whose
+    // size the guest decides: a 512x512 texture scaled four times needs 16 MB of
+    // staging, and a texture-pack replacement can need four times that again.
+    // Under memory pressure the allocation fails, vkMapMemory leaves the pointer
+    // null, and the memcpy that used to follow wrote through it.
+    const auto give_up = [&](const char *what) {
+        static bool reported = false;
+        if (!reported) {
+            reported = true;
+            std::cout << "[render] cannot stage a texture (" << what << "); it will be drawn white\n";
+        }
+        if (staging_memory != VK_NULL_HANDLE) vkFreeMemory(device, staging_memory, nullptr);
+        if (staging != VK_NULL_HANDLE) vkDestroyBuffer(device, staging, nullptr);
+        return Texture{};
+    };
+    if (vkCreateBuffer(device, &buffer_info, nullptr, &staging) != VK_SUCCESS) return give_up("no buffer");
     VkMemoryRequirements requirements{};
     vkGetBufferMemoryRequirements(device, staging, &requirements);
     VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
     allocate.allocationSize = requirements.size;
     allocate.memoryTypeIndex = find_memory_type(
         requirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    vkAllocateMemory(device, &allocate, nullptr, &staging_memory);
-    vkBindBufferMemory(device, staging, staging_memory, 0u);
+    if (vkAllocateMemory(device, &allocate, nullptr, &staging_memory) != VK_SUCCESS)
+        return give_up("out of host memory");
+    if (vkBindBufferMemory(device, staging, staging_memory, 0u) != VK_SUCCESS) return give_up("cannot bind");
     void *mapped = nullptr;
-    vkMapMemory(device, staging_memory, 0u, bytes, 0u, &mapped);
+    if (vkMapMemory(device, staging_memory, 0u, bytes, 0u, &mapped) != VK_SUCCESS || mapped == nullptr)
+        return give_up("cannot map");
     std::memcpy(mapped, pixels, static_cast<std::size_t>(bytes));
     vkUnmapMemory(device, staging_memory);
 
@@ -2490,10 +2959,15 @@ VulkanRenderer::Impl::Texture &VulkanRenderer::Impl::texture_for(const GuestMemo
         for (auto it = textures.begin(); it != textures.end(); ++it) {
             if (it->second.last_used < oldest->second.last_used) oldest = it;
         }
-        const perf::Clock::time_point wait_start = perf::Clock::now();
-        vkQueueWaitIdle(queue);
-        perf::add_wait_time(perf::Clock::now() - wait_start);
-        destroy_texture(oldest->second);
+        // Retired, not destroyed. vkQueueWaitIdle stood in for safety here, but
+        // it only drains what has been submitted: this runs from submit(), with
+        // the frame's command buffer open and earlier draws in it already holding
+        // this texture's descriptor set. Freeing it now hands a dead set to the
+        // queue when the frame goes in.
+        //
+        // begin_frame waits on the frame fence before anything else, so that is
+        // where a retired texture is genuinely idle, and where it is destroyed.
+        retired_textures.push_back(oldest->second);
         textures.erase(oldest);
     }
     // All of this happens once per texture, behind the same cache as the
@@ -2516,7 +2990,14 @@ VulkanRenderer::Impl::Texture &VulkanRenderer::Impl::texture_for(const GuestMemo
                             texture_scale_sharp ? TextureScaleMode::Sharp : TextureScaleMode::Smooth);
     }
     Texture texture = create_texture(width, height, pixels.data());
-    if (texture.descriptor == VK_NULL_HANDLE) return white_texture;
+    if (texture.descriptor == VK_NULL_HANDLE) {
+        // The image and its memory may well exist even though whatever came after
+        // them failed. Nothing is inserted into the cache, so this is the only
+        // chance to release them: dropping the local leaked a whole image on every
+        // missed lookup of every frame, which empties a device in seconds.
+        destroy_texture(texture);
+        return white_texture;
+    }
     return textures.emplace(key, texture).first->second;
 }
 
@@ -3200,6 +3681,34 @@ void VulkanRenderer::set_shadow_casters(const std::array<float, 16> &world_to_cl
     impl.shadow_casters = casters;
 }
 
+std::uint64_t VulkanRenderer::arena_peak_bytes() const noexcept {
+    return impl_ ? static_cast<std::uint64_t>(impl_->peak_vertex_offset) : 0u;
+}
+
+std::uint64_t VulkanRenderer::dropped_draws() const noexcept {
+    return impl_ ? impl_->dropped_draws : 0u;
+}
+
+std::string VulkanRenderer::blob_report() const {
+    if (impl_ == nullptr) return {};
+    return "drawn " + std::to_string(impl_->blob_frames) + ", no casters " +
+           std::to_string(impl_->blob_no_casters) + ", no transform " +
+           std::to_string(impl_->blob_no_transform);
+}
+
+std::uint64_t VulkanRenderer::arena_bytes() const noexcept {
+    return static_cast<std::uint64_t>(kVertexBufferBytes);
+}
+
+void VulkanRenderer::set_colour_grade(float strength) {
+    Impl &impl = *impl_;
+    if (!impl.ready) return;
+    const float wanted = std::clamp(strength, 0.0f, 1.0f);
+    if (impl.post_grade == wanted) return;
+    impl.post_grade = wanted;
+    std::cout << "[render] colour grading " << (wanted > 0.0f ? "on" : "off") << "\n";
+}
+
 void VulkanRenderer::set_contact_shadows(float strength) {
     Impl &impl = *impl_;
     if (!impl.ready) return;
@@ -3417,6 +3926,9 @@ void VulkanRenderer::begin_frame() {
         impl.writeback_has_pixels = true;
         impl.writeback_in_flight = false;
     }
+    // The fence above says the frame that may still have been using these has
+    // finished, which is the one moment an evicted texture can safely go.
+    impl.destroy_retired_textures();
     vkResetCommandBuffer(impl.command_buffer, 0u);
     VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -3435,6 +3947,10 @@ void VulkanRenderer::begin_frame() {
         impl.shadow_map->begin_frame();
     }
     impl.pass_active = false;
+    // Read again at present time, after the per-frame counters have been
+    // cleared, so they are reset here rather than there.
+    impl.ao_seam_passed = false;
+    impl.ao_in_scene = false;
     impl.recording = true;
 }
 
@@ -3510,10 +4026,36 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     // The blobs belong after the scene and before the interface. The first
     // through-mode draw of a frame that has drawn 3D is exactly that seam:
     // everything from here on is flat and would paint over them.
-    if (call.through && !impl.blobs_drawn && impl.frame_transformed_draws != 0u && impl.blob_strength > 0.0f &&
-        impl.shadow_transform_valid && !impl.shadow_casters.empty()) {
+    // frame_transformed_draws != 0 belongs in the test that decides whether this
+    // through-mode draw is the seam at all, not in the reasons below it. Moved
+    // inside, it let the first flat draw of a frame consume blobs_drawn before
+    // any 3D had been drawn -- and since the game does draw flat things early,
+    // that switched the blobs off entirely rather than measuring them.
+    if (call.through && !impl.blobs_drawn && impl.blob_strength > 0.0f && impl.frame_transformed_draws != 0u) {
         impl.blobs_drawn = true;
-        draw_shadow_blobs(memory);
+        if (!impl.shadow_transform_valid) {
+            ++impl.blob_no_transform;
+        } else if (impl.shadow_casters.empty()) {
+            ++impl.blob_no_casters;
+        } else {
+            ++impl.blob_frames;
+            impl.drawing_blobs = true;
+            draw_shadow_blobs(memory);
+            impl.drawing_blobs = false;
+        }
+    }
+
+    // The same seam, for ambient occlusion: the depth buffer here describes the
+    // world and only the world, and everything from here on paints over the
+    // result rather than being shaded by it. Once per frame, and only when
+    // something 3D was actually drawn -- a menu has no creases.
+    if (call.through && !impl.ao_seam_passed && impl.frame_transformed_draws != 0u && impl.post_ao > 0.0f &&
+        impl.ao_available()) {
+        impl.ao_seam_passed = true;
+        std::string target_error;
+        if (Impl::Target *scene = impl.target_for(impl.current_target, target_error);
+            scene != nullptr && scene->initialized)
+            impl.record_scene_ao(*scene);
     }
 
     // Everything becomes a triangle list; sprites expand to two triangles.
@@ -3801,8 +4343,17 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
         // floor drops a shadow onto it that belongs to no object in the world.
         // MGA_SHADOW_EVERYTHING_CASTS restores the wide behaviour.
         static const bool everything_casts = std::getenv("MGA_SHADOW_EVERYTHING_CASTS") != nullptr;
+        // is_identity(call.world) stands for "already in draw space, because the
+        // game skinned it on the CPU". It is a proxy, and the shadow blobs break
+        // it: they are built in world space and submitted with an identity world
+        // matrix on purpose, so they satisfy the test while violating the thing it
+        // stands for. Collected, they drag the light's bounding box out by the
+        // camera's position, and a box tens of thousands of units wide across 1024
+        // texels leaves a character two or three texels of shadow -- so switching
+        // blob shadows on would quietly destroy cast shadows.
         if (impl.shadow_available && impl.shadow_map != nullptr && impl.shadow_strength > 0.0f &&
-            !impl.scratch.empty() && !call.clear_mode && (everything_casts || is_identity(call.world))) {
+            !impl.scratch.empty() && !call.clear_mode && !impl.drawing_blobs &&
+            (everything_casts || is_identity(call.world))) {
             impl.shadow_map->add_casters(&impl.scratch[0].x, impl.scratch.size(),
                                         sizeof(GpuVertex) / sizeof(float), call.world);
             impl.shadow_trace.casters = static_cast<std::uint32_t>(impl.shadow_map->captured());
@@ -3893,7 +4444,18 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
         }
     }
     const auto view_world = multiply(call.view, call.world);
-    if ((lit || fogged) && impl.environment_version != call.environment_version) {
+    // The same widening the object block needed below, and for the same reason:
+    // both shaders read this block on every transformed draw once shadows are on,
+    // not only the lit ones. Getting one and not the other was worse than getting
+    // neither, because the uniform blocks are bump-allocated out of the vertex
+    // buffer and that cursor restarts every frame -- so an unwritten block does
+    // not hold last frame's lighting, it holds this frame's vertices. A texture
+    // coordinate read as shadow_params.x is positive often enough to switch
+    // shadowing on for geometry that was never in the light's map, which is
+    // dark blotches drifting over the scenery.
+    const bool needs_environment =
+        lit || fogged || (impl.shadow_light >= 0 && impl.shadow_strength > 0.0f && !call.through && !call.clear_mode);
+    if (needs_environment && impl.environment_version != call.environment_version) {
         const LightingState &state = call.lighting;
         EnvironmentBlock environment{};
         environment.ambient = unpack_color(state.ambient_color, static_cast<float>(state.ambient_alpha) / 255.0f);
@@ -3904,8 +4466,14 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
         static const bool shadow_debug = std::getenv("MGA_SHADOW_DEBUG") != nullptr;
         environment.shadow_transform = impl.shadow_light_transform;
         const bool casting = impl.shadow_light >= 0 && impl.shadow_strength > 0.0f;
+        environment.shadow_shape = {kShadowSoftness, kShadowMaxRadiusTexels, 0.0f, 0.0f};
+        // A negative index means the direction was inferred rather than taken
+        // from one of the game's lights. Clamping it to 0 pointed the shader at
+        // light 0, which may be switched off: the lit path then found no light to
+        // subtract and left lit objects unshadowed while the scenery around them
+        // darkened, so a character standing in a shadow stayed bright.
         environment.shadow_params = {casting ? impl.shadow_strength : 0.0f,
-                                     static_cast<float>(std::max(impl.shadow_light, 0)),
+                                     static_cast<float>(impl.shadow_light),
                                      casting ? (shadow_debug ? -1.0f : 1.0f) /
                                                    static_cast<float>(impl.shadow_map->resolution())
                                              : 0.0f,
@@ -3923,7 +4491,10 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
             environment.light_diffuse[i] = unpack_color(light.diffuse);
             environment.light_specular[i] = unpack_color(light.specular);
         }
-        if (!impl.write_uniform(&environment, sizeof(environment), impl.environment_offset)) return;
+        if (!impl.write_uniform(&environment, sizeof(environment), impl.environment_offset)) {
+            impl.note_drop("environment block");
+            return;
+        }
         impl.environment_version = call.environment_version;
     }
     // Unlit geometry receives shadows too, and to find itself in the light's
@@ -3951,13 +4522,19 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
         object.material_diffuse = impl.material[2];
         object.material_specular = impl.material[3];
         if (!impl.object_valid || std::memcmp(&object, &impl.last_object, sizeof(object)) != 0) {
-            if (!impl.write_uniform(&object, sizeof(object), impl.object_offset)) return;
+            if (!impl.write_uniform(&object, sizeof(object), impl.object_offset)) {
+                impl.note_drop("object block");
+                return;
+            }
             impl.last_object = object;
             impl.object_valid = true;
         }
     }
     const VkDeviceSize bytes = impl.scratch.size() * sizeof(GpuVertex);
-    if (impl.vertex_offset + bytes > kVertexBufferBytes) return;
+    if (impl.vertex_offset + bytes > kVertexBufferBytes) {
+        impl.note_drop("vertices");
+        return;
+    }
     std::memcpy(static_cast<std::uint8_t *>(impl.vertex_mapped) + impl.vertex_offset, impl.scratch.data(),
                 static_cast<std::size_t>(bytes));
 
@@ -4007,7 +4584,8 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     PushConstants push{};
     push.transform = multiply(call.projection, view_world);
     push.viewport = {static_cast<float>(kPspWidth), static_cast<float>(kPspHeight), call.through ? 1.0f : 0.0f,
-                     (fogged ? kPushFog : 0.0f) + (lit ? kPushLighting : 0.0f)};
+                     (fogged ? kPushFog : 0.0f) + (lit ? kPushLighting : 0.0f) +
+                         (impl.drawing_blobs ? kPushNoShadow : 0.0f)};
     push.view_z = {view_world[2], view_world[6], view_world[10], view_world[14]};
     // Bit 4 asks the shader to snap texture coordinates to texel centres,
     // which turns the smooth sampler into a sharp one for this draw alone.
@@ -4027,7 +4605,10 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
                            static_cast<float>(call.alpha_test.enabled ? call.alpha_test.reference : 0u),
                            static_cast<float>(call.alpha_test.enabled ? call.alpha_test.function : 0u)};
     // Through-mode texture coordinates are in texels, transformed ones in [0,1].
-    push.uv_transform = call.through && call.texture.width != 0u
+    // Both dimensions, not only the width: the GE takes them from independent
+    // nibbles, and a shift of 15 truncates to zero in a 16-bit field, so a guest
+    // can present a width with no height and make the reciprocal infinite.
+    push.uv_transform = call.through && call.texture.width != 0u && call.texture.height != 0u
                             ? std::array<float, 4>{1.0f / static_cast<float>(call.texture.width),
                                                    1.0f / static_cast<float>(call.texture.height), 0.0f, 0.0f}
                             : std::array<float, 4>{call.texture.scale_u, call.texture.scale_v, call.texture.offset_u,
@@ -4573,6 +5154,7 @@ void VulkanRenderer::present(std::uint32_t display_address) {
         }
         impl.shadow_trace = {};
     }
+    impl.peak_vertex_offset = std::max(impl.peak_vertex_offset, impl.vertex_offset);
     impl.frame_views.clear();
     impl.frame_through_draws = 0u;
     impl.blobs_drawn = false;
@@ -4713,15 +5295,22 @@ void VulkanRenderer::shutdown() {
     vkDestroySampler(impl.device, impl.sharp_sampler, nullptr);
     vkDestroySampler(impl.device, impl.clamp_sampler, nullptr);
     vkDestroySampler(impl.device, impl.clamp_sharp_sampler, nullptr);
+    vkDestroySampler(impl.device, impl.mip_sampler, nullptr);
     if (impl.shadow_map) impl.shadow_map->destroy();
     impl.drop_post_descriptors();
+    impl.drop_ao_resources();
+    vkDestroyPipeline(impl.device, impl.ao_pipeline, nullptr);
+    vkDestroyPipelineLayout(impl.device, impl.ao_pipeline_layout, nullptr);
+    vkDestroyDescriptorSetLayout(impl.device, impl.ao_set_layout, nullptr);
+    vkDestroyShaderModule(impl.device, impl.ao_fragment_shader, nullptr);
+    vkDestroyShaderModule(impl.device, impl.ao_vertex_shader, nullptr);
+    vkDestroyRenderPass(impl.device, impl.ao_render_pass, nullptr);
     vkDestroyPipeline(impl.device, impl.post_pipeline, nullptr);
     vkDestroyPipelineLayout(impl.device, impl.post_pipeline_layout, nullptr);
     vkDestroyDescriptorSetLayout(impl.device, impl.post_set_layout, nullptr);
     vkDestroyShaderModule(impl.device, impl.post_vertex_shader, nullptr);
     vkDestroyShaderModule(impl.device, impl.post_fragment_shader, nullptr);
     vkDestroyRenderPass(impl.device, impl.post_render_pass, nullptr);
-    vkDestroyDescriptorPool(impl.device, impl.descriptor_pool, nullptr);
     vkDestroyDescriptorSetLayout(impl.device, impl.descriptor_layout, nullptr);
     vkDestroyDescriptorSetLayout(impl.device, impl.lighting_layout, nullptr);
     vkDestroyPipelineLayout(impl.device, impl.pipeline_layout, nullptr);
@@ -4732,6 +5321,12 @@ void VulkanRenderer::shutdown() {
     impl.destroy_target(impl.held);
     impl.held = {};
     impl.holding = false;
+    // After the targets, not before: destroy_target frees each target's sampling
+    // descriptor sets, and freeing a set from a pool that has already been
+    // destroyed is undefined. This was the order before the ambient occlusion
+    // pass was added and is not part of it, but it is the same mistake that pass
+    // had to avoid, so it is corrected here rather than left next to the fix.
+    vkDestroyDescriptorPool(impl.device, impl.descriptor_pool, nullptr);
     vkDestroyRenderPass(impl.device, impl.render_pass, nullptr);
     vkDestroySemaphore(impl.device, impl.image_available, nullptr);
     vkDestroySemaphore(impl.device, impl.render_finished, nullptr);

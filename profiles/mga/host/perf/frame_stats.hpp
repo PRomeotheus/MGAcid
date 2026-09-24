@@ -60,7 +60,12 @@ struct Summary {
     double frame_max_ms{};
     double guest_ms{};
     double render_ms{};
-    double wait_ms{};
+    double wait_ms{};   // gpu_ms + pacing_ms, kept for the overlay
+    // The two halves of the wait, which mean opposite things: blocked on the
+    // GPU says the frame is limited by presentation, held to real time says the
+    // guest's own clock has already run ahead and we are only catching up.
+    double gpu_ms{};
+    double pacing_ms{};
     double overlay_ms{};
     std::string present_mode;
     std::uint32_t width{};

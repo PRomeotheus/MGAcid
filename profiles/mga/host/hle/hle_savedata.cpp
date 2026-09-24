@@ -641,4 +641,17 @@ void register_savedata(HleRegistrar &hle, const std::filesystem::path &memory_st
     });
 }
 
+
+// ---------------------------------------------------------------------------
+// Save states
+
+std::string why_no_savedata_state() {
+    // The game's own save dialog. While it is up the guest is polling it and the
+    // host holds the operation it is part way through; a restore would leave the
+    // guest waiting on a dialog that no longer exists.
+    if (state().dialog.active()) return "the save dialog is open";
+    if (state().pending) return "a save is in progress";
+    return {};
+}
+
 } // namespace mga

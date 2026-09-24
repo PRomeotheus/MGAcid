@@ -28,12 +28,14 @@
 // same thing everywhere.
 
 #include "psprecomp/snapshot.hpp"
+// By value in StagedMachine below, so the declaration alone will not do.
+#include "psprecomp/allegrex_context.hpp"
 
 #include <cstdint>
+#include <vector>
 
 namespace psprecomp {
 
-struct AllegrexContext;
 class GuestMemory;
 
 // "PSRS": a PSPRecomp save state. Checked before anything else is read, so a
@@ -58,5 +60,29 @@ void write_machine(SnapshotWriter &out, const GuestMemory &memory, const Allegre
 // One context on its own, for a profile writing out its threads.
 void write_context(SnapshotWriter &out, const AllegrexContext &context);
 [[nodiscard]] bool read_context(SnapshotReader &in, AllegrexContext &context);
+
+// The machine read aside instead of applied.
+//
+// read_machine writes straight into the guest, which is all a profile with
+// nothing else in its state needs. A profile that has its own sections to read
+// after it needs more than that: if one of those turns out to be truncated, the
+// guest has already been overwritten and the running game is destroyed by a
+// state that was never loadable. Since a failed load is the case a save state
+// has to survive -- a player who loses a session to a bad file is worse off than
+// one who never had save states -- the read is offered in two halves, so a
+// caller can validate everything before committing anything.
+struct StagedMachine {
+    std::vector<std::uint8_t> ram;
+    std::vector<std::uint8_t> vram;
+    std::vector<std::uint8_t> scratchpad;
+    AllegrexContext context{};
+};
+
+// Reads what read_machine reads, into `staged`. `memory` is consulted for the
+// sizes the regions must have, and is not written to.
+[[nodiscard]] bool read_machine_staged(SnapshotReader &in, const GuestMemory &memory, StagedMachine &staged);
+// Puts a staged machine into place. Cannot fail: read_machine_staged has
+// already established that every region is the size this build expects.
+void apply_machine(GuestMemory &memory, AllegrexContext &context, const StagedMachine &staged);
 
 } // namespace psprecomp

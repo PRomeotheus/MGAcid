@@ -38,9 +38,15 @@ struct Settings {
     bool smart_2d{true};               // sample pixel-mapped 2D sharp, whatever the 3D filter is
     bool post_process{};               // show the frame through a shader pass rather than a plain blit
     bool fxaa{};                       // anti-alias the finished frame; needs post_process
-    float contact_shadows{};           // 0 off .. 1 strongest; darkens creases from depth; needs post_process
+    float contact_shadows{};           // 0 off .. 1 strongest; darkens creases from depth, drawn with the scene
     float blob_shadows{};              // 0 off .. 1 strongest; a soft blob under each character
     float shadow_maps{};               // 0 off .. 1 strongest; shadows cast from the game's own lights
+    float colour_grade{};              // 0 off .. 1 strongest; contrast and saturation lift; needs post_process
+    // Show an extra image between the game's own frames, built by carrying the
+    // last frame's motion forward. The game itself is untouched and still runs
+    // at thirty: it takes one simulation step per frame and cannot be made to
+    // take more without running at double speed.
+    bool frame_smoothing{};
     bool unthrottled{};                // let emulated time run ahead of real time
     PerfDisplay perf{PerfDisplay::Off};
 
@@ -53,6 +59,7 @@ struct Settings {
     bool mute{};
 
     // Controls
+    bool state_hotkeys{true};          // F1-F4 save a state, with shift load it
     bool confirm_south{};              // confirm (circle) on the south face button
     float dead_zone{0.15f};
     float trigger{0.25f};

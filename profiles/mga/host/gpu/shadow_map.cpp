@@ -393,20 +393,35 @@ void ShadowMap::add_casters(const float *positions, std::size_t vertex_count, st
     if (positions == nullptr || stride < 3u) return;
     // Whole triangles only: a partial one would be a stray sliver in the map.
     vertex_count -= vertex_count % 3u;
-    for (std::size_t i = 0; i < vertex_count; ++i) {
-        if (captured_.size() >= kMaxCasterVertices) return;
-        const float *p = positions + i * stride;
-        if (!(std::isfinite(p[0]) && std::isfinite(p[1]) && std::isfinite(p[2]))) return;
-        // Column-major, translation in 12..14, as every GE matrix is.
-        std::array<float, 4> at{};
-        for (std::size_t row = 0; row < 3u; ++row)
-            at[row] = world[row] * p[0] + world[4u + row] * p[1] + world[8u + row] * p[2] + world[12u + row];
-        at[3] = 1.0f;
-        if (!(std::isfinite(at[0]) && std::isfinite(at[1]) && std::isfinite(at[2]))) return;
-        captured_.push_back(at);
-        for (std::size_t axis = 0; axis < 3u; ++axis) {
-            minimum_[axis] = std::min(minimum_[axis], at[axis]);
-            maximum_[axis] = std::max(maximum_[axis], at[axis]);
+    // A triangle at a time, so the two ways out below cannot leave a partial one
+    // behind. Taking them a vertex at a time was the mistake: hitting the budget
+    // or meeting one bad number in the middle of a triangle abandoned the rest of
+    // the draw, which took the whole of a character's shadow with it.
+    for (std::size_t i = 0; i + 2u < vertex_count; i += 3u) {
+        if (captured_.size() + 3u > kMaxCasterVertices) return;
+        std::array<std::array<float, 4>, 3> triangle{};
+        bool usable = true;
+        for (std::size_t corner = 0; corner < 3u && usable; ++corner) {
+            const float *p = positions + (i + corner) * stride;
+            if (!(std::isfinite(p[0]) && std::isfinite(p[1]) && std::isfinite(p[2]))) {
+                usable = false;
+                break;
+            }
+            // Column-major, translation in 12..14, as every GE matrix is.
+            std::array<float, 4> &at = triangle[corner];
+            for (std::size_t row = 0; row < 3u; ++row)
+                at[row] = world[row] * p[0] + world[4u + row] * p[1] + world[8u + row] * p[2] + world[12u + row];
+            at[3] = 1.0f;
+            if (!(std::isfinite(at[0]) && std::isfinite(at[1]) && std::isfinite(at[2]))) usable = false;
+        }
+        // Skipped, not fatal: one bad triangle costs one triangle.
+        if (!usable) continue;
+        for (const std::array<float, 4> &at : triangle) {
+            captured_.push_back(at);
+            for (std::size_t axis = 0; axis < 3u; ++axis) {
+                minimum_[axis] = std::min(minimum_[axis], at[axis]);
+                maximum_[axis] = std::max(maximum_[axis], at[axis]);
+            }
         }
     }
 }
@@ -512,7 +527,10 @@ bool ShadowMap::resolve_light(const LightingState &lighting, const std::array<fl
     const std::array<float, 16> projection = orthographic(half, half, 1.0f, distance + half * 3.0f);
     capture_transform_ = multiply(projection, view);
     light_direction_ = to_light;
-    capture_light_ = std::max(chosen, 0);
+    // Kept as it is, including -1: the renderer passes it to the shader, which
+    // reads a negative index as "no light of the game's own", and shadows lit
+    // geometry by darkening it the way it does unlit geometry.
+    capture_light_ = chosen;
     capture_has_light_ = true;
     return true;
 }

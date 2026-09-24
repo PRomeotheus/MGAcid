@@ -24,9 +24,30 @@ bool attach(gpu::VulkanRenderer &renderer);
 // overlay, and the menu when it is open over the running game).
 void draw_over_game();
 
+// Whether the last draw_over_game() put anything on screen. The interface is
+// composited into a frame as it is presented and the draw data is spent doing
+// it, so a second present of the same frame has no interface on it. Anything
+// presenting a frame the game did not draw has to know to stand down while
+// there is an interface to lose.
+[[nodiscard]] bool overlay_drawn();
+
 // After a game frame's window events: whether the player asked for the menu
 // (Esc, or L3+R3 on a gamepad).
 [[nodiscard]] bool menu_requested();
+
+// And whether they asked for a save state with a function key: F1 to F4 save to
+// a slot, with shift held they load it. False when none was asked for, leaving
+// both arguments untouched.
+//
+// This only reports the request. Carrying it out belongs to the display call,
+// which is the one place holding a guest context at a dispatch boundary.
+[[nodiscard]] bool state_hotkey(unsigned &slot, bool &load);
+
+// Whether the fast-forward key is held right now. Asked every frame rather than
+// reported once, so letting go is as immediate as pressing.
+[[nodiscard]] bool fast_forward_held();
+// Whether a screenshot was asked for, reported once.
+[[nodiscard]] bool screenshot_requested();
 
 // Whether the menu, opened now, pauses the game. Settings decide: "Pause the
 // game when the menu opens", and during ad hoc play "Pause during

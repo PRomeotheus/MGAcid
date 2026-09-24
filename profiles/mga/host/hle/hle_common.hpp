@@ -79,6 +79,48 @@ void register_adhoc(HleRegistrar &hle);
 // Calls only Metal Gear Ac!d needs (hle_mga.cpp).
 void register_mga(HleRegistrar &hle);
 
+// Save states ---------------------------------------------------------------
+// Each part of the HLE layer that holds state the game can observe writes and
+// reads its own section, because only the translation unit that owns a
+// structure can be relied on to keep its serialisation in step with it.
+//
+// Why a state cannot be taken, or empty when it can. The HLE layer's answer is
+// separate from the kernel's: this is about work in flight that lives on the
+// host rather than in the guest -- a video being decoded, a display list part
+// way through.
+[[nodiscard]] std::string why_no_media_state();
+void write_media_state(psprecomp::SnapshotWriter &out);
+[[nodiscard]] bool read_media_state(psprecomp::SnapshotReader &in);
+
+// Open files. A host file comes back by being opened again and seeked to where
+// it was, a file on the disc image by its offset, so these do restore -- which
+// matters because the game keeps the disc open the whole time it is running,
+// and refusing a save while any file was open would refuse every save.
+[[nodiscard]] std::string why_no_io_state();
+void write_io_state(psprecomp::SnapshotWriter &out);
+[[nodiscard]] bool read_io_state(psprecomp::SnapshotReader &in);
+
+// The rest of the HLE layer holds work that only exists on the host. Each of
+// these says whether it has any in flight; none of them has anything to write,
+// because in every case the answer to having some is to refuse.
+//
+// A video in progress is decoders full of state built up frame by frame; an ad
+// hoc session is a socket and another player; an open dialog is a conversation
+// the guest is part way through. None survives being replaced underneath.
+[[nodiscard]] std::string why_no_mpeg_state();
+[[nodiscard]] std::string why_no_adhoc_state();
+[[nodiscard]] std::string why_no_savedata_state();
+[[nodiscard]] std::string why_no_utility_state();
+
+// Music is the exception, and has to be: it plays for as long as the game runs,
+// so refusing while a track is open would refuse every save. A track is
+// rebuildable -- the header and the encoded data are in the guest's own buffer,
+// which a state restores -- so only the position is kept and the decoder is
+// opened again on the way back in.
+[[nodiscard]] std::string why_no_atrac_state();
+void write_atrac_state(psprecomp::SnapshotWriter &out);
+[[nodiscard]] bool read_atrac_state(psprecomp::SnapshotReader &in, const psprecomp::GuestMemory &memory);
+
 #if defined(MGA_HAS_RENDERER)
 namespace gpu { class VulkanRenderer; }
 // The renderer owns the window, so HLE that needs host input goes through it.

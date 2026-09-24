@@ -610,4 +610,21 @@ void register_mpeg(HleRegistrar &hle) {
     register_jpeg(hle);
 }
 
+
+// ---------------------------------------------------------------------------
+// Save states
+
+std::string why_no_mpeg_state() {
+    // A video in progress is a demuxer part way through a stream, an H.264
+    // decoder holding reference frames, and an audio decoder alongside it. None
+    // of that is guest state, and none of it can be rebuilt from the guest's
+    // memory the way a music track can: the decoders' contents depend on every
+    // frame fed to them since the video started.
+    //
+    // Refusing costs nothing. A video is the one moment nobody wants to save at,
+    // and the game only plays them between missions.
+    if (!module().instances.empty()) return "a video is playing";
+    return {};
+}
+
 } // namespace mga

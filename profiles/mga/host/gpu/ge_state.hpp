@@ -1,5 +1,6 @@
 #pragma once
 
+#include "psprecomp/snapshot.hpp"
 #include "psprecomp/guest_memory.hpp"
 
 #include <array>
@@ -222,6 +223,16 @@ public:
     [[nodiscard]] std::uint64_t draw_count() const noexcept { return draw_count_; }
     [[nodiscard]] std::uint64_t vertex_count() const noexcept { return vertex_count_; }
     [[nodiscard]] std::uint64_t unhandled_command_count() const noexcept { return unhandled_commands_; }
+
+    // Save states. The GE's registers are not reissued from scratch every
+    // frame -- a game sets most of them up once and relies on them staying put
+    // -- so they belong in a state. The three sinks do not: they are host
+    // wiring, established once at startup and the same on either side of a
+    // restore. Nor does call_ (scratch reused by every draw) or call_stack_,
+    // which is only non-empty part way through a list, and a state is taken
+    // between frames.
+    void write_state(psprecomp::SnapshotWriter &out) const;
+    [[nodiscard]] bool read_state(psprecomp::SnapshotReader &in);
 
 private:
     // Resolves a display-list address operand against BASE and OFFSET_ADDR.

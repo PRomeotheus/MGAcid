@@ -10,7 +10,7 @@
 // to cover the layouts rather than any particular picture, and a folder of tiny
 // binaries in the repository would not say which layout each one was.
 
-#include "gpu/texture_pack.hpp"
+#include "common/texture_pack.hpp"
 
 #include <cstdint>
 #include <cstdio>
@@ -26,8 +26,8 @@ extern "C" {
 }
 
 namespace fs = std::filesystem;
-using mga::gpu::PackedTexture;
-using mga::gpu::TexturePack;
+using psp::gpu::PackedTexture;
+using psp::gpu::TexturePack;
 
 namespace {
 

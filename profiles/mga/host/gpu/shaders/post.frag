@@ -20,7 +20,7 @@ layout(push_constant) uniform Push {
     vec4 rect;
     // 1 / the scene target's size, for neighbour taps.
     vec2 texel;
-    // x: effects (1 = FXAA), y: spare.
+    // x: effects (1 = FXAA), y: colour grading strength, 0 when off.
     vec2 effects;
     // x: +1 when a larger depth value means nearer, -1 otherwise -- the GE's
     // viewport decides it, and the game does reverse the range in places.
@@ -126,6 +126,26 @@ float contact_shadow(vec2 uv, float here, float slope) {
     return occlusion * 0.125;
 }
 
+// A gentle grade. PSP art was authored for a small, dim, low-contrast screen,
+// and on a modern display it reads as washed out -- not because the colours are
+// wrong but because the range they were made for was narrower than the one they
+// are shown in now.
+//
+// So: a little more contrast about mid grey, and a little more saturation. Both
+// deliberately mild, and both applied to the whole picture including the
+// interface, because grading part of a frame is what makes a grade obvious.
+// Overdone, this is the effect that makes an old game look like a bad filter
+// rather than a better screen, which is why the strength is a setting and the
+// default is subtle.
+vec3 grade(vec3 color, float strength) {
+    const float kContrast = 0.12;
+    const float kSaturation = 0.18;
+    // Around 0.5 rather than 0, so raising contrast does not also brighten.
+    vec3 contrasted = clamp((color - 0.5) * (1.0 + kContrast * strength) + 0.5, 0.0, 1.0);
+    float grey = luma(contrasted);
+    return clamp(mix(vec3(grey), contrasted, 1.0 + kSaturation * strength), 0.0, 1.0);
+}
+
 void main() {
     const vec2 uv = (frag_uv - push.rect.xy) / push.rect.zw;
     // Both of these have to be read before the letterbox test below, because
@@ -141,5 +161,6 @@ void main() {
         const float shade = clamp(contact_shadow(uv, here, slope) * push.depth.w, 0.0, 0.8);
         color *= 1.0 - shade;
     }
+    if (push.effects.y > 0.0) color = grade(color, push.effects.y);
     out_color = vec4(color, 1.0);
 }

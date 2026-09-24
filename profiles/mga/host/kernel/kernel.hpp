@@ -2,6 +2,7 @@
 
 #include "psprecomp/allegrex_context.hpp"
 #include "psprecomp/runtime.hpp"
+#include "psprecomp/snapshot.hpp"
 
 #include <array>
 #include <chrono>
@@ -224,6 +225,21 @@ public:
     // not move. Checked at preemption boundaries.
     void check_for_hang(const AllegrexContext &ctx);
     [[nodiscard]] std::uint64_t cpu_scale() const noexcept { return cpu_scale_; }
+    // What the last frame was actually charged for running translated code, in
+    // microseconds of host time. The scale multiplies this to get the emulated
+    // time the guest is billed, so the two together say whether the guest's
+    // clock is being advanced by work or by something else.
+    [[nodiscard]] std::uint64_t last_work_us() const noexcept { return last_work_us_; }
+    // Emulated time granted by jumping the clock forward while nothing was
+    // runnable, split by what the guest was actually waiting for. Work explains
+    // only a third of the clock; this says who gets the rest.
+    [[nodiscard]] std::string describe_idle_time() const;
+    // Held down rather than switched on: while this is true the clock is not
+    // paced to real time, so the game runs as fast as frames can be drawn. Set
+    // from the key each frame, which is why it is not a setting -- a setting
+    // that a key toggles is a setting the player can leave in the wrong state.
+    void set_fast_forward(bool fast) noexcept { fast_forward_ = fast; }
+    [[nodiscard]] bool fast_forward() const noexcept { return fast_forward_; }
 
     // Threads -------------------------------------------------------------
     [[nodiscard]] SceUID allocate_uid() noexcept { return next_uid_++; }
@@ -312,6 +328,27 @@ public:
     // One line per thread: state, what it waits for and where it resumes.
     [[nodiscard]] std::string describe_threads() const;
 
+    // Save states ---------------------------------------------------------
+    // Why a state cannot be taken right now, or empty when it can.
+    //
+    // The whole of the kernel is plain data except in one situation: a host
+    // continuation is live. A thread in a host wait holds a closure that polls
+    // it; a queued or running interrupt may hold one to run when the guest
+    // handler returns; a guest call in progress holds one to resume the import
+    // that made it. None of those can be written to a file and none can be
+    // rebuilt on the way back in, because what they capture is host state, not
+    // guest state.
+    //
+    // Rather than make host waits resumable -- a large change for a small gain,
+    // since they happen during a load or a video and nowhere a player wants to
+    // save -- a state is refused while one is live, with a reason to show.
+    [[nodiscard]] std::string why_no_state() const;
+    // The kernel's own section of a state. The running thread's context is
+    // written by the caller as part of the machine, so `ctx` is stored into the
+    // current thread first and this writes what the caller does not.
+    void write_state(psprecomp::SnapshotWriter &out, const AllegrexContext &ctx);
+    [[nodiscard]] bool read_state(psprecomp::SnapshotReader &in, AllegrexContext &ctx);
+
     // Periodic hook from the runtime's starvation boundary.
     void on_starvation(AllegrexContext &ctx);
     // Guest time a stretch of translated code without kernel calls costs.
@@ -337,12 +374,12 @@ private:
     // the virtual clock forward when nothing is ready.
     void schedule(AllegrexContext &ctx);
     [[nodiscard]] Thread *best_ready_thread() noexcept;
-    void advance_clock(std::uint64_t target_us);
+
     // Holds the virtual clock to real time, so the game runs at PSP speed
     // however fast frames are drawn and presented. False when pacing is off.
     bool pace_to_real_time();
     [[nodiscard]] bool real_time_clock_active() const noexcept;
-    [[nodiscard]] std::optional<std::uint64_t> next_event_us() const;
+
     void process_timers();
     bool begin_pending_interrupt(AllegrexContext &ctx);
     void finish_wait_timeout(Thread &thread);
@@ -362,9 +399,28 @@ private:
     bool cpu_scale_fixed_{};
     std::chrono::steady_clock::time_point last_work_boundary_{};
     std::uint64_t frame_work_us_{};
+    std::uint64_t last_work_us_{};
+    // Emulated time granted, split by WHY it was granted rather than by what
+    // happened to be waiting at the time. The first attempt bucketed by the
+    // state of the threads and could not tell the two apart: the work charge
+    // goes through advance_clock as well, so with a sound thread blocked it was
+    // filed under whatever that thread was doing.
+    enum class ClockReason { Work, Vblank, Deadline, VTimer, HostPoll, Count };
+    std::array<std::uint64_t, static_cast<std::size_t>(ClockReason::Count)> clock_us_{};
+    std::array<std::uint64_t, static_cast<std::size_t>(ClockReason::Count)> clock_steps_{};
+    void advance_clock(std::uint64_t target_us, ClockReason why);
+    [[nodiscard]] std::optional<std::uint64_t> next_event_us(ClockReason &why) const;
+    // A deadline can belong to any kind of wait -- a delay, or a semaphore with
+    // a timeout -- and which it is decides whether the game is pacing itself or
+    // being held up. So the deadline time is split again, by the wait it came
+    // from and the thread that owns it.
+    mutable SceUID deadline_owner_{};
+    mutable WaitType deadline_type_{WaitType::None};
+    std::map<std::string, std::uint64_t> deadline_by_thread_;
     std::chrono::steady_clock::time_point last_frame_{};
     unsigned hang_reports_{};
     std::uint64_t now_us_{};
+    bool fast_forward_{};
     bool pacing_started_{};
     std::chrono::steady_clock::time_point pacing_real_base_{};
     std::uint64_t pacing_virtual_base_{};

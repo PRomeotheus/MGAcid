@@ -130,6 +130,8 @@ void set_runtime_thread_identity(std::int32_t uid, const std::string &name) noex
 std::int32_t runtime_thread_uid() noexcept { return g_runtime_thread_uid; }
 const char *runtime_thread_name() noexcept { return g_runtime_thread_name.data(); }
 std::uint32_t runtime_dispatch_pc() noexcept { return g_runtime_dispatch_pc; }
+void invalidate_runtime_execution_context() noexcept { ++g_runtime_thread_switch_generation_fast; }
+
 RuntimeExecutionContextToken capture_runtime_execution_context() noexcept {
     return RuntimeExecutionContextToken{g_runtime_thread_uid, g_runtime_thread_switch_generation_fast};
 }

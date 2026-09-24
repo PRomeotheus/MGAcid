@@ -1,4 +1,9 @@
 set(MGA_PROFILE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+# Host code shared with the other profiles: nothing in it is specific to a game,
+# so it sits beside the profiles rather than inside one. A profile opts in by
+# listing the files it wants and adding this to its include path -- there is no
+# library target, so a profile that wants none of it links nothing extra.
+set(PSP_COMMON_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../common")
 
 # The AOT corpus is derived from the user's executable and is not committed.
 # Until scripts/generate.sh has produced it, link an empty registry instead.
@@ -39,11 +44,13 @@ if(MGA_RENDERER)
                     "kGeFragmentShader=${MGA_PROFILE_DIR}/host/gpu/shaders/ge.frag"
                     "kPostVertexShader=${MGA_PROFILE_DIR}/host/gpu/shaders/post.vert"
                     "kPostFragmentShader=${MGA_PROFILE_DIR}/host/gpu/shaders/post.frag"
+                    "kAoFragmentShader=${MGA_PROFILE_DIR}/host/gpu/shaders/ao.frag"
                     "kShadowVertexShader=${MGA_PROFILE_DIR}/host/gpu/shaders/shadow.vert"
             DEPENDS "${MGA_PROFILE_DIR}/host/gpu/shaders/ge.vert"
                     "${MGA_PROFILE_DIR}/host/gpu/shaders/ge.frag"
                     "${MGA_PROFILE_DIR}/host/gpu/shaders/post.vert"
                     "${MGA_PROFILE_DIR}/host/gpu/shaders/post.frag"
+                    "${MGA_PROFILE_DIR}/host/gpu/shaders/ao.frag"
                     "${MGA_PROFILE_DIR}/host/gpu/shaders/shadow.vert"
                     "${MGA_PROFILE_DIR}/tools/embed_shaders.py"
             COMMENT "Compiling GE shaders to SPIR-V")
@@ -51,6 +58,7 @@ if(MGA_RENDERER)
         # Dear ImGui (third_party/imgui, unmodified) draws the port's own
         # interface over the game.
         set(MGA_RENDERER_SOURCES
+            host/gpu/frame_record.cpp
             host/gpu/vulkan_renderer.cpp
             host/ui/file_browser.cpp
             host/ui/font_menu.cpp
@@ -99,16 +107,18 @@ set(MGA_HOST_SOURCES
     host/audio/audio_sink.cpp
     host/audio/sas_core.cpp
     host/gpu/ge_state.cpp
+    host/gpu/ge_state_serialise.cpp
     host/gpu/texture_decode.cpp
     host/gpu/shadow_map.cpp
-    host/gpu/texture_pack.cpp
-    host/gpu/texture_scale.cpp
+    "${PSP_COMMON_DIR}/texture_pack.cpp"
+    "${PSP_COMMON_DIR}/texture_scale.cpp"
     host/perf/frame_stats.cpp
     host/perf/perf_overlay.cpp
     host/overlays.cpp
     host/mga_profile.cpp
     host/kernel/scene.cpp
     host/kernel/kernel.cpp
+    host/kernel/kernel_state.cpp
     host/kernel/iso_image.cpp
     host/kernel/call_watch.cpp
     host/kernel/sound_paths.cpp
@@ -142,6 +152,7 @@ set(MGA_HOST_SOURCES
     host/install/installer_dialogs.cpp
     host/install/user_data.cpp
     host/settings/settings.cpp
+    host/state/save_state.cpp
     third_party/tiny_aes/aes.c
 )
 # tiny-AES-c is C; the project only enables C++, which compiles it unchanged.
@@ -234,20 +245,16 @@ if(MGA_RENDERER)
         "${CMAKE_CURRENT_BINARY_DIR}/generated_version"
         "${MGA_PROFILE_DIR}/third_party/imgui")
     target_link_libraries(MGAcid PRIVATE SDL3::SDL3 Vulkan::Vulkan)
-    # The SDL3 DLL the build linked against goes next to the executable, so
-    # the program never picks up another architecture's copy by hand.
-    if(WIN32)
-        add_custom_command(TARGET MGAcid POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL3::SDL3> $<TARGET_FILE_DIR:MGAcid>
-            COMMENT "Copying SDL3.dll next to MGAcid")
-    endif()
 endif()
 # The host only: the generated code never sees FFmpeg.
 mga_use_ffmpeg(MGAcid)
 target_include_directories(MGAcid PRIVATE
     "${MGA_PROFILE_DIR}/host"
     "${MGA_PROFILE_DIR}/third_party"
-    "${MGA_PROFILE_DIR}/generated")
+    "${MGA_PROFILE_DIR}/generated"
+    # So the shared headers are reached as "common/...", the same spelling from
+    # every profile.
+    "${CMAKE_CURRENT_SOURCE_DIR}/..")
 target_link_libraries(MGAcid PRIVATE psprecomp_core ${CMAKE_DL_LIBS})
 if(WIN32)
     # The ad hoc client's and server's sockets, and the list of interfaces.
@@ -334,14 +341,42 @@ if(PSPRECOMP_BUILD_TESTS)
     add_test(NAME mga_adhoc_tests COMMAND mga_adhoc_tests)
 endif()
 
+# Save states with no game: that every field written comes back, by writing a
+# state, reading it, writing it again and comparing the two streams -- which is
+# what catches a field that was added to a structure and serialised in only one
+# direction. The one module-loader symbol the kernel refers to is stubbed rather
+# than linked, since none of this reaches it.
+add_executable(mga_state_tests
+    tests/state_tests.cpp
+    tests/state_stubs.cpp
+    host/gpu/ge_state.cpp
+    host/gpu/ge_state_serialise.cpp
+    host/kernel/kernel.cpp
+    host/kernel/kernel_state.cpp
+    host/perf/frame_stats.cpp
+    host/settings/settings.cpp
+    host/install/user_data.cpp
+    host/app_paths.cpp)
+target_include_directories(mga_state_tests PRIVATE "${MGA_PROFILE_DIR}/host")
+target_link_libraries(mga_state_tests PRIVATE psprecomp_core)
+if(TARGET SDL3::SDL3)
+    target_link_libraries(mga_state_tests PRIVATE SDL3::SDL3)
+endif()
+set_target_properties(mga_state_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+if(PSPRECOMP_BUILD_TESTS)
+    add_test(NAME mga_state_tests COMMAND mga_state_tests)
+endif()
+
 # Replacement textures: that a dump reads back exactly, and that every PNG
 # layout an image editor produces is understood. Needs the PNG codec, so it is
 # only built when FFmpeg is there to provide one.
 if(MGA_HAS_FFMPEG)
     add_executable(mga_texture_pack_tests
         tests/texture_pack_tests.cpp
-        host/gpu/texture_pack.cpp)
-    target_include_directories(mga_texture_pack_tests PRIVATE "${MGA_PROFILE_DIR}/host")
+        "${PSP_COMMON_DIR}/texture_pack.cpp")
+    target_include_directories(mga_texture_pack_tests PRIVATE
+        "${MGA_PROFILE_DIR}/host"
+        "${CMAKE_CURRENT_SOURCE_DIR}/..")
     mga_use_ffmpeg(mga_texture_pack_tests)
     set_target_properties(mga_texture_pack_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
     if(PSPRECOMP_BUILD_TESTS)

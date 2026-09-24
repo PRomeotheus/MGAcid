@@ -498,4 +498,101 @@ void register_io(HleRegistrar &hle, const std::filesystem::path &disc_image, con
     hle.add("sceUmdUser", "sceUmdGetErrorStat", [](Runtime &, AllegrexContext &ctx) { kernel().finish(ctx, 0u); });
 }
 
+
+// ---------------------------------------------------------------------------
+// Save states
+
+std::string why_no_io_state() {
+    // Nothing here blocks a save. An open file is described by its path and its
+    // position, and both survive: a file on the disc image needs only its
+    // offset, and a host file is opened again and seeked. That has to be true
+    // rather than convenient -- the game holds the disc open from the moment it
+    // starts, so a rule that refused a save while any file was open would
+    // refuse every save there is.
+    return {};
+}
+
+void write_io_state(psprecomp::SnapshotWriter &out) {
+    IoState &state = io();
+    out.u32(static_cast<std::uint32_t>(state.files.size()));
+    for (const auto &[fd, file] : state.files) {
+        out.u32(fd);
+        out.u32(static_cast<std::uint32_t>(file.kind));
+        out.text(file.path);
+        out.u64(file.disc_offset);
+        out.u64(file.size);
+        // The position of a host file is the stream's, which is what reads and
+        // writes have actually moved; `position` tracks it but the stream is
+        // the authority.
+        std::uint64_t position = file.position;
+        if (file.kind == OpenFile::Kind::Host && file.host && *file.host)
+            position = static_cast<std::uint64_t>(file.host->tellg());
+        out.u64(position);
+        // A directory's listing is what sceIoDread walks; the game may be part
+        // way through it, and re-reading the directory could hand back a
+        // different order.
+        out.u32(static_cast<std::uint32_t>(file.listing.size()));
+        for (const std::string &entry : file.listing) out.text(entry);
+    }
+    out.u32(state.next_fd);
+    // Not the disc image or the memory stick path: both are how this session
+    // was launched, not something the game changed. A state that carried them
+    // could point a restore at a disc the player no longer has.
+}
+
+bool read_io_state(psprecomp::SnapshotReader &in) {
+    IoState &state = io();
+    const std::uint32_t count = in.u32();
+    if (!in.ok() || count > in.remaining() / sizeof(std::uint32_t)) {
+        in.fail();
+        return false;
+    }
+    std::map<std::uint32_t, OpenFile> files;
+    for (std::uint32_t i = 0; i < count; ++i) {
+        const std::uint32_t fd = in.u32();
+        const std::uint32_t kind = in.u32();
+        if (kind > static_cast<std::uint32_t>(OpenFile::Kind::Directory)) {
+            in.fail();
+            return false;
+        }
+        OpenFile file;
+        file.kind = static_cast<OpenFile::Kind>(kind);
+        file.path = in.text();
+        file.disc_offset = in.u64();
+        file.size = in.u64();
+        file.position = in.u64();
+        const std::uint32_t entries = in.u32();
+        if (!in.ok() || entries > in.remaining() / sizeof(std::uint32_t)) {
+            in.fail();
+            return false;
+        }
+        for (std::uint32_t j = 0; j < entries; ++j) file.listing.push_back(in.text());
+        if (!in.ok()) return false;
+        if (file.kind == OpenFile::Kind::Host) {
+            // Reopened read/write, the way the game had it or more permissively:
+            // a state cannot know which flags it was opened with, and a file the
+            // game only reads is not harmed by being openable for writing.
+            const auto path = host_path(file.path);
+            auto stream = std::make_unique<std::fstream>(path, std::ios::binary | std::ios::in | std::ios::out);
+            if (!*stream) {
+                // The file is gone since the state was written. Not a reason to
+                // refuse the whole restore -- the game will see an error on the
+                // next read, which is what it would see on hardware if the
+                // memory stick had been pulled.
+                std::cout << "[state] cannot reopen " << file.path << "; the game will see it as unreadable\n";
+            } else {
+                stream->seekg(static_cast<std::streamoff>(file.position));
+                stream->seekp(static_cast<std::streamoff>(file.position));
+                file.host = std::move(stream);
+            }
+        }
+        files.emplace(fd, std::move(file));
+    }
+    const std::uint32_t next_fd = in.u32();
+    if (!in.ok()) return false;
+    state.files = std::move(files);
+    state.next_fd = next_fd;
+    return true;
+}
+
 } // namespace mga

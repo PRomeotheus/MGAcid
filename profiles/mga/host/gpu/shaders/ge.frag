@@ -38,11 +38,29 @@ layout(set = 1, binding = 0) uniform Environment {
     vec4 light_specular[4];
     mat4 shadow_transform;
     vec4 shadow_params;
+    vec4 shadow_shape;
 } lighting;
 
+// A ring of offsets, reused for both passes below. Twelve points at two radii
+// so a wide blur does not show its own sample pattern as banding.
+const vec2 kRing[12] = vec2[12](
+    vec2( 1.000,  0.000), vec2( 0.500,  0.866), vec2(-0.500,  0.866), vec2(-1.000,  0.000),
+    vec2(-0.500, -0.866), vec2( 0.500, -0.866), vec2( 0.707,  0.707), vec2(-0.707,  0.707),
+    vec2(-0.707, -0.707), vec2( 0.707, -0.707), vec2( 0.000,  0.520), vec2( 0.000, -0.520));
+
 // How much of the shadowing light reaches this fragment: 1 in the open, 0 in
-// full shadow. Sampled over a 3x3 block so the map's resolution shows up as a
-// soft edge rather than a staircase.
+// full shadow.
+//
+// The edge is not one width. A real shadow is sharp where the object touches
+// the ground and spreads as it reaches away from it, because the further the
+// blocker is the more of the light's disc it fails to cover. A single fixed
+// blur is the thing that makes a shadow look stuck on rather than cast, so the
+// width is measured here rather than chosen.
+//
+// The light's projection is orthographic, so depths in its map are linear and
+// the gap between blocker and receiver can be read straight off as a
+// difference. That is what makes this affordable: no reconstruction, just a
+// subtraction.
 float shadow_reach() {
     if (lighting.shadow_params.x <= 0.0 || frag_shadow_position.w <= 0.0) return 1.0;
     vec3 projected = frag_shadow_position.xyz / frag_shadow_position.w;
@@ -53,13 +71,51 @@ float shadow_reach() {
     // Negative marks the debug mode; the size itself is what matters here.
     float texel = abs(lighting.shadow_params.z);
     float bias = lighting.shadow_params.w;
-    float lit = 0.0;
-    for (int y = -1; y <= 1; ++y)
-        for (int x = -1; x <= 1; ++x) {
-            float recorded = texture(shadow_map, uv + vec2(float(x), float(y)) * texel).r;
-            lit += projected.z - bias <= recorded ? 1.0 : 0.0;
+    float receiver = projected.z - bias;
+
+    // First: how far away is whatever is standing in the light's way? Only
+    // samples in front of this surface are blockers; the rest are the surface
+    // itself and say nothing about the width of its shadow.
+    float search = texel * 4.0;
+    float blocker_depth = 0.0;
+    float blockers = 0.0;
+    for (int i = 0; i < 12; ++i) {
+        float recorded = texture(shadow_map, uv + kRing[i] * search).r;
+        if (recorded < receiver) {
+            blocker_depth += recorded;
+            blockers += 1.0;
         }
-    return lit / 9.0;
+    }
+    // And the centre, for the same reason the penumbra loop below takes it: the
+    // nearest ring offset is two texels out, so a shadow narrower than the ring
+    // -- an arm, a barrel, a railing -- can cover this fragment while missing
+    // every tap. Without this the search finds no blocker, returns fully lit,
+    // and the thin shadow flickers as the caster moves across the ring.
+    {
+        float recorded = texture(shadow_map, uv).r;
+        if (recorded < receiver) {
+            blocker_depth += recorded;
+            blockers += 1.0;
+        }
+    }
+    // Nothing between this surface and the light.
+    if (blockers < 0.5) return 1.0;
+    blocker_depth /= blockers;
+
+    // Then: the wider the gap, the wider the penumbra. Never narrower than one
+    // texel, or the map's own resolution shows as a staircase; never wider than
+    // the cap, or a distant caster smears across the whole scene.
+    float gap = max(receiver - blocker_depth, 0.0);
+    float radius = clamp(gap * lighting.shadow_shape.x, texel, texel * max(lighting.shadow_shape.y, 1.0));
+
+    float lit = 0.0;
+    for (int i = 0; i < 12; ++i) {
+        float recorded = texture(shadow_map, uv + kRing[i] * radius).r;
+        lit += receiver <= recorded ? 1.0 : 0.0;
+    }
+    // The centre tap, so a shadow narrower than the ring still registers.
+    lit += receiver <= texture(shadow_map, uv).r ? 1.0 : 0.0;
+    return lit / 13.0;
 }
 
 void main() {

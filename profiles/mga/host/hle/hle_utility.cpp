@@ -381,4 +381,14 @@ void register_utility(HleRegistrar &hle, const std::filesystem::path &memory_sti
     register_savedata(hle, memory_stick);
 }
 
+
+// ---------------------------------------------------------------------------
+// Save states
+
+std::string why_no_utility_state() {
+    if (osk_state().status != dialog_status::kNone) return "the on-screen keyboard is open";
+    if (msg_dialog().active()) return "a system message is on screen";
+    return {};
+}
+
 } // namespace mga

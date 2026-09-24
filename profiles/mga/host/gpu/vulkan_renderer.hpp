@@ -123,6 +123,19 @@ public:
     // Darkens the creases where geometry meets, read out of the depth
     // buffer in the post pass. 0 turns it off. Needs post-processing.
     void set_contact_shadows(float strength);
+    // Lifts contrast and saturation in the post pass, to put the art back in
+    // the range it was authored for. 0 turns it off. Needs post-processing.
+    void set_colour_grade(float strength);
+
+    // Vertices and uniform blocks come out of one per-frame arena, and a draw
+    // that does not fit is dropped. These report how close a frame came to the
+    // end of it and how many draws have been lost, so "something flickers" can
+    // be answered with a number rather than a theory.
+    [[nodiscard]] std::uint64_t arena_peak_bytes() const noexcept;
+    [[nodiscard]] std::uint64_t arena_bytes() const noexcept;
+    [[nodiscard]] std::uint64_t dropped_draws() const noexcept;
+    // What the blob seam decided, counted since the game started.
+    [[nodiscard]] std::string blob_report() const;
     // Blob shadows under the characters. 0 turns them off. Unlike the effects
     // above this does not need the post-processing pass: the blobs are drawn
     // with the scene, so they sit under the geometry properly.

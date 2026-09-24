@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <functional>
 #include <optional>
+#include <utility>
 #include <string>
 
 union SDL_Event;
@@ -51,6 +52,18 @@ public:
 
     // Requests from the player, each reported once.
     bool take_menu_toggle();  // L3+R3; Esc while the game runs
+    // A save state asked for with a function key. False when none was, leaving
+    // both arguments untouched.
+    bool take_state_hotkey(unsigned &slot, bool &load);
+    // Whether the fast-forward key is down right now.
+    //
+    // Read from the keyboard rather than tracked through key events, because a
+    // release can go missing -- alt-tabbing away mid-press is enough -- and a
+    // missed release would leave the game running fast with no key held and no
+    // way to stop it. Polling cannot get stuck: it reports what is true now.
+    [[nodiscard]] bool fast_forward() const;
+    // A screenshot asked for, reported once.
+    bool take_screenshot_request();
     bool take_back();         // Esc while a screen runs
     std::optional<std::filesystem::path> take_dropped_file();
     [[nodiscard]] bool window_closed() const noexcept { return window_closed_; }
@@ -93,6 +106,11 @@ private:
     // while a screen opens does not activate its first row.
     bool gamepad_armed_{};
     bool menu_toggle_{};
+    // The slot a function key named, and whether it asked to load. Held rather
+    // than acted on: a state may only be taken at a dispatch boundary, and a
+    // window event is nowhere near one.
+    std::optional<std::pair<unsigned, bool>> state_hotkey_{};
+    bool screenshot_{};
     bool back_{};
     std::optional<std::filesystem::path> dropped_;
 };

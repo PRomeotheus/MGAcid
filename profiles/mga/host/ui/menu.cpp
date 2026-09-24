@@ -22,6 +22,7 @@
 #include "install/user_data.hpp"
 #include "perf/frame_stats.hpp"
 #include "save_data/save_transfer.hpp"
+#include "state/save_state.hpp"
 #include "settings/settings.hpp"
 #include "yakumo_version.hpp"
 
@@ -305,6 +306,20 @@ void Menu::video() {
         }
     }
     {
+        RowOptions o = options_for(
+            "video.frame_smoothing",
+            "Shows an extra image between the game's own frames, worked out by carrying the motion in the last two "
+            "forward. Metal Gear Ac!d draws thirty frames a second and takes exactly one step of its simulation per "
+            "frame, so it cannot be asked for more without the whole game running at double speed -- the frames in "
+            "between have to be invented instead. Motion is predicted rather than known, so something that stops or "
+            "reverses sharply can overshoot for half a frame. The interface and anything else laid out to the pixel "
+            "is left exactly where the game put it.");
+        if (toggle_row("Frame smoothing", s.frame_smoothing, o)) {
+            s.frame_smoothing = !s.frame_smoothing;
+            settings::save();
+        }
+    }
+    {
         RowOptions o = options_for("video.post_process",
                                    "Shows the finished frame through a shader pass instead of copying it straight "
                                    "to the window. On its own it changes nothing; it is what the effects below "
@@ -337,12 +352,29 @@ void Menu::video() {
         RowOptions o = options_for("video.contact_shadows",
                                    "Darkens the creases where things meet -- where a character stands on the floor, "
                                    "where a wall joins it. The PSP had no room for this, and it is what makes "
-                                   "characters sit in the scene rather than float above it.");
-        o.disabled = !s.post_process;
-        if (o.disabled) o.note = "needs post-processing";
+                                   "characters sit in the scene rather than float above it. Drawn with the scene, "
+                                   "before the interface, so it shades the world and not the HUD.");
         if (const int delta = choice_row("Contact shadows", names[level], o)) {
             s.contact_shadows = levels[cycle(level, delta, 4)];
             renderer().set_contact_shadows(s.contact_shadows);
+            settings::save();
+        }
+    }
+    {
+        const float levels[4] = {0.0f, 0.35f, 0.7f, 1.0f};
+        const char *names[4] = {"Off", "Subtle", "Medium", "Strong"};
+        int level = 0;
+        for (int i = 3; i > 0; --i)
+            if (s.colour_grade >= levels[i] - 0.01f) { level = i; break; }
+        RowOptions o = options_for("video.colour_grade",
+                                  "Lifts contrast and saturation a little. The art was drawn for a small, dim "
+                                  "screen, and on a modern one it reads as washed out. Subtle is the point: turned "
+                                  "up far this stops looking like a better screen and starts looking like a filter.");
+        o.disabled = !s.post_process;
+        if (o.disabled) o.note = "needs post-processing";
+        if (const int delta = choice_row("Colour", names[level], o)) {
+            s.colour_grade = levels[cycle(level, delta, 4)];
+            renderer().set_colour_grade(s.colour_grade);
             settings::save();
         }
     }
@@ -1063,6 +1095,59 @@ void Menu::system() {
     section("Saves");
     save_rows();
 
+    section("Keys");
+    info_row("Fast forward", "hold Tab");
+    info_row("Screenshot", "F12");
+    info_row("Save state", "F1 to F4");
+    info_row("Load state", "shift and F1 to F4");
+    info_row("This menu", "Esc, or both sticks");
+
+    section("Save states");
+    {
+        settings::Settings &st = settings::current();
+        if (toggle_row("Function keys save and load", st.state_hotkeys,
+                       options_for("input.state_hotkeys",
+                                   "F1 to F4 save a state to that slot; hold shift to load it instead. The "
+                                   "modifier is on loading because a stray load costs the game you are playing, "
+                                   "where a stray save costs only what was in the slot."))) {
+            st.state_hotkeys = !st.state_hotkeys;
+            settings::save();
+        }
+        // A state is the whole machine, not the game's own save: it comes back
+        // exactly where it left off, in the middle of a turn if that is where
+        // it was taken.
+        const std::string refusal = state::why_not_now();
+        if (!refusal.empty()) paragraph("Cannot save a state right now: " + refusal + ".", colors::kTextDim);
+        else if (!state::last_message().empty()) paragraph(state::last_message(), colors::kTextDim);
+        for (unsigned slot = 0; slot < state::kSlotCount; ++slot) {
+            const std::string name = "Slot " + std::to_string(slot + 1u);
+            const bool filled = state::slot_exists(slot);
+            RowOptions save_options{};
+            save_options.note = state::slot_description(slot);
+            save_options.disabled = !refusal.empty();
+            if (save_options.disabled) save_options.note = "not now";
+            save_options.description =
+                "Write everything the game is doing to " + name +
+                ", to come back to later. It does not touch the game's own saves.";
+            if (button_row(("Save to " + name).c_str(), save_options)) {
+                // Recorded rather than done here: the menu has no guest context,
+                // and a state may only be taken at a dispatch boundary. The
+                // frame's display call carries it out a moment from now.
+                state::request(state::Request::Save, slot);
+                close_ = true;
+            }
+            RowOptions load_options{};
+            load_options.disabled = !filled;
+            if (!filled) load_options.note = "empty";
+            load_options.description = "Put the game back to where " + name +
+                                       " was taken. Anything since then is lost.";
+            if (button_row(("Load " + name).c_str(), load_options)) {
+                state::request(state::Request::Load, slot);
+                close_ = true;
+            }
+        }
+    }
+
     section("About");
     info_row("Yakumo", std::string(kYakumoVersion));
     info_row("Game", std::string(install::kGameTitle) + " (" + install::kDiscIdDisplay + ")");
@@ -1209,7 +1294,15 @@ void note_menu_closed(bool quit) {
 
 bool attach(gpu::VulkanRenderer &renderer) { return Layer::get().attach(renderer); }
 
+bool &overlay_drawn_flag() {
+    static bool drawn = false;
+    return drawn;
+}
+
+bool overlay_drawn() { return overlay_drawn_flag(); }
+
 void draw_over_game() {
+    overlay_drawn_flag() = false;
     Layer &layer = Layer::get();
     if (!layer.attached()) return;
     script::tick();
@@ -1217,12 +1310,14 @@ void draw_over_game() {
     // The game's own dialogs: drawn over every game frame until done. A
     // keyboard opened from the menu over the running game is the menu's.
     if (text_input_open() && !menu) {
+        overlay_drawn_flag() = true;
         layer.begin_frame();
         text_input_frame();
         layer.end_frame();
         return;
     }
     if (savedata_dialog_open() && !menu) {
+        overlay_drawn_flag() = true;
         layer.begin_frame();
         savedata_dialog_frame();
         layer.end_frame();
@@ -1231,6 +1326,7 @@ void draw_over_game() {
     const double hint_left = menu || settings::current().menu_hint_seen ? -1.0 : hint_seconds_left();
     const bool overlay = network_overlay();
     if (hint_left <= 0.0 && !overlay && !menu) return;
+    overlay_drawn_flag() = true;
     layer.begin_frame();
     if (hint_left > 0.0) draw_hint(hint_left);
     if (overlay) draw_network_overlay();
@@ -1267,6 +1363,26 @@ bool take_quit_request() { return std::exchange(quit_requested(), false); }
 bool menu_requested() {
     Layer &layer = Layer::get();
     return layer.attached() && !text_input_open() && layer.take_menu_toggle();
+}
+
+bool fast_forward_held() {
+    Layer &layer = Layer::get();
+    // Not while the interface has the keyboard, and not while something is being
+    // typed into: a tab there belongs to the field.
+    return layer.attached() && !text_input_open() && !menu_over_game() && layer.fast_forward();
+}
+
+bool screenshot_requested() {
+    Layer &layer = Layer::get();
+    return layer.attached() && layer.take_screenshot_request();
+}
+
+bool state_hotkey(unsigned &slot, bool &load) {
+    Layer &layer = Layer::get();
+    // Not while something is being typed into: a function key pressed in a text
+    // field belongs to the field.
+    if (!layer.attached() || text_input_open()) return false;
+    return layer.take_state_hotkey(slot, load);
 }
 
 bool run_menu() {

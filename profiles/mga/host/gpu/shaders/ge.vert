@@ -53,6 +53,9 @@ layout(set = 1, binding = 0) uniform Environment {
     // x: strength, 0 when off; y: which light casts; z: one shadow map texel;
     // w: depth bias.
     vec4 shadow_params;
+    // x: how fast a shadow softens with the gap between caster and surface;
+    // y: the widest it may spread, in texels; z and w spare.
+    vec4 shadow_shape;
 } lighting;
 
 // A lit draw's world matrix and material; the layout matches ObjectBlock.
@@ -95,7 +98,13 @@ void light_vertex(out vec4 color, out vec3 separate_specular, out vec3 shadow_li
     light_clip.z = (light_clip.z + light_clip.w) * 0.5;
     shadow_position = light_clip;
     shadow_light = vec3(0.0);
-    int shadow_index = lighting.shadow_params.x > 0.0 ? int(lighting.shadow_params.y + 0.5) : -1;
+    // A negative index never matches a loop counter, which is what makes an
+    // inferred direction contribute no subtractable light. Rounding is only
+    // applied to a non-negative value: int(-1.0 + 0.5) truncates to 0, which
+    // would have picked light 0 and undone the distinction.
+    int shadow_index = lighting.shadow_params.x > 0.0 && lighting.shadow_params.y >= 0.0
+                           ? int(lighting.shadow_params.y + 0.5)
+                           : -1;
     for (int i = 0; i < 4; ++i) {
         if (lighting.light_position[i].w < 0.5) continue;
         int type = int(lighting.light_direction[i].w + 0.5);
@@ -164,10 +173,15 @@ void main() {
     } else {
         int enables = int(push.viewport.w + 0.5);
         if ((enables & 2) != 0) {
+            // Bit 4 is set by a draw that is itself a shadow; it receives none.
             vec3 blocked_light = vec3(0.0);
             light_vertex(frag_color, frag_specular, blocked_light, frag_shadow_position);
-            frag_shadow_light = vec4(blocked_light, 0.0);
-        } else if (lighting.shadow_params.x > 0.0) {
+            // With no light of the game's own behind the shadow -- the direction
+            // was inferred instead -- there is nothing to subtract, so this
+            // geometry is darkened like unlit geometry rather than left bright.
+            bool inferred = lighting.shadow_params.x > 0.0 && lighting.shadow_params.y < 0.0;
+            frag_shadow_light = vec4(blocked_light, inferred ? 1.0 : 0.0);
+        } else if (lighting.shadow_params.x > 0.0 && (enables & 4) == 0) {
             // Unlit geometry receives too. Its colours are baked, so there is
             // no light term to subtract and the fragment shader darkens it
             // instead. The world matrix is written for every transformed draw

@@ -629,6 +629,13 @@ struct VulkanRenderer::Impl {
         vertex_offset = at + size;
         return true;
     }
+    // Textures evicted while a frame was being recorded. Destroyed at the top of
+    // the next frame, once its fence says the frame that referenced them is done.
+    std::vector<Texture> retired_textures;
+    void destroy_retired_textures() {
+        for (Texture &texture : retired_textures) destroy_texture(texture);
+        retired_textures.clear();
+    }
     void forget_bindings() {
         bound_pipeline = VK_NULL_HANDLE;
         lighting_bound = false;
@@ -757,15 +764,38 @@ struct VulkanRenderer::Impl {
         VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
         allocate.allocationSize = requirements.size;
         allocate.memoryTypeIndex = find_memory_type(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        if (!check(vkAllocateMemory(device, &allocate, nullptr, &memory), "vkAllocateMemory", error)) return false;
+        if (!check(vkAllocateMemory(device, &allocate, nullptr, &memory), "vkAllocateMemory", error)) {
+            // The image outlived the allocation that failed. Left behind it would
+            // be unreachable: callers that get false discard every handle, so
+            // nothing would ever destroy it.
+            vkDestroyImage(device, image, nullptr);
+            image = VK_NULL_HANDLE;
+            return false;
+        }
         vkBindImageMemory(device, image, memory, 0u);
 
+        // A view is only legal on an image whose usage can carry one. Three
+        // images here -- the overlay, the upload staging image and the write-back
+        // one -- are transfer only, and a view on those is a specification
+        // violation the layers report, for a view nothing ever reads.
+        constexpr VkImageUsageFlags kViewable =
+            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT;
+        if ((usage & kViewable) == 0u) {
+            view = VK_NULL_HANDLE;
+            return true;
+        }
         VkImageViewCreateInfo view_info{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
         view_info.image = image;
         view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
         view_info.format = format;
         view_info.subresourceRange = {aspect, 0u, 1u, 0u, 1u};
-        return check(vkCreateImageView(device, &view_info, nullptr, &view), "vkCreateImageView", error);
+        if (check(vkCreateImageView(device, &view_info, nullptr, &view), "vkCreateImageView", error)) return true;
+        vkFreeMemory(device, memory, nullptr);
+        vkDestroyImage(device, image, nullptr);
+        memory = VK_NULL_HANDLE;
+        image = VK_NULL_HANDLE;
+        return false;
     }
 
     void transition(VkCommandBuffer commands, VkImage image, VkImageLayout from, VkImageLayout to,
@@ -1684,17 +1714,33 @@ VulkanRenderer::Impl::Texture VulkanRenderer::Impl::create_texture(std::uint32_t
     VkBufferCreateInfo buffer_info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     buffer_info.size = bytes;
     buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-    vkCreateBuffer(device, &buffer_info, nullptr, &staging);
+    // Checked, unlike most allocations here, because these are the ones whose
+    // size the guest decides. Under memory pressure the allocation fails,
+    // vkMapMemory leaves the pointer null, and the memcpy that used to follow
+    // wrote through it.
+    const auto give_up = [&](const char *what) {
+        static bool reported = false;
+        if (!reported) {
+            reported = true;
+            std::cout << "[render] cannot stage a texture (" << what << "); it will be drawn white\n";
+        }
+        if (staging_memory != VK_NULL_HANDLE) vkFreeMemory(device, staging_memory, nullptr);
+        if (staging != VK_NULL_HANDLE) vkDestroyBuffer(device, staging, nullptr);
+        return Texture{};
+    };
+    if (vkCreateBuffer(device, &buffer_info, nullptr, &staging) != VK_SUCCESS) return give_up("no buffer");
     VkMemoryRequirements requirements{};
     vkGetBufferMemoryRequirements(device, staging, &requirements);
     VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
     allocate.allocationSize = requirements.size;
     allocate.memoryTypeIndex = find_memory_type(
         requirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    vkAllocateMemory(device, &allocate, nullptr, &staging_memory);
-    vkBindBufferMemory(device, staging, staging_memory, 0u);
+    if (vkAllocateMemory(device, &allocate, nullptr, &staging_memory) != VK_SUCCESS)
+        return give_up("out of host memory");
+    if (vkBindBufferMemory(device, staging, staging_memory, 0u) != VK_SUCCESS) return give_up("cannot bind");
     void *mapped = nullptr;
-    vkMapMemory(device, staging_memory, 0u, bytes, 0u, &mapped);
+    if (vkMapMemory(device, staging_memory, 0u, bytes, 0u, &mapped) != VK_SUCCESS || mapped == nullptr)
+        return give_up("cannot map");
     std::memcpy(mapped, pixels, static_cast<std::size_t>(bytes));
     vkUnmapMemory(device, staging_memory);
 
@@ -1777,14 +1823,26 @@ VulkanRenderer::Impl::Texture &VulkanRenderer::Impl::texture_for(const GuestMemo
         for (auto it = textures.begin(); it != textures.end(); ++it) {
             if (it->second.last_used < oldest->second.last_used) oldest = it;
         }
-        const perf::Clock::time_point wait_start = perf::Clock::now();
-        vkQueueWaitIdle(queue);
-        perf::add_wait_time(perf::Clock::now() - wait_start);
-        destroy_texture(oldest->second);
+        // Retired, not destroyed. vkQueueWaitIdle stood in for safety here, but
+        // it only drains what has been submitted: this runs from submit(), with
+        // the frame's command buffer open and earlier draws in it already holding
+        // this texture's descriptor set. Freeing it now hands a dead set to the
+        // queue when the frame goes in.
+        //
+        // begin_frame waits on the frame fence before anything else, so that is
+        // where a retired texture is genuinely idle, and where it is destroyed.
+        retired_textures.push_back(oldest->second);
         textures.erase(oldest);
     }
     Texture texture = create_texture(state.width, state.height, pixels.data());
-    if (texture.descriptor == VK_NULL_HANDLE) return white_texture;
+    if (texture.descriptor == VK_NULL_HANDLE) {
+        // The image and its memory may well exist even though whatever came after
+        // them failed. Nothing is inserted into the cache, so this is the only
+        // chance to release them: dropping the local leaked a whole image on every
+        // missed lookup of every frame, which empties a device in seconds.
+        destroy_texture(texture);
+        return white_texture;
+    }
     return textures.emplace(key, texture).first->second;
 }
 
@@ -2553,6 +2611,9 @@ void VulkanRenderer::begin_frame() {
         impl.writeback_has_pixels = true;
         impl.writeback_in_flight = false;
     }
+    // The fence above says the frame that may still have been using these has
+    // finished, which is the one moment an evicted texture can safely go.
+    impl.destroy_retired_textures();
     vkResetCommandBuffer(impl.command_buffer, 0u);
     VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -3429,7 +3490,6 @@ void VulkanRenderer::shutdown() {
     vkDestroySampler(impl.device, impl.sharp_sampler, nullptr);
     vkDestroySampler(impl.device, impl.clamp_sampler, nullptr);
     vkDestroySampler(impl.device, impl.clamp_sharp_sampler, nullptr);
-    vkDestroyDescriptorPool(impl.device, impl.descriptor_pool, nullptr);
     vkDestroyDescriptorSetLayout(impl.device, impl.descriptor_layout, nullptr);
     vkDestroyDescriptorSetLayout(impl.device, impl.lighting_layout, nullptr);
     vkDestroyPipelineLayout(impl.device, impl.pipeline_layout, nullptr);
@@ -3440,6 +3500,10 @@ void VulkanRenderer::shutdown() {
     impl.destroy_target(impl.held);
     impl.held = {};
     impl.holding = false;
+    // After the targets, not before: destroy_target frees each target's sampling
+    // descriptor sets, and freeing a set from a pool that has already been
+    // destroyed is undefined.
+    vkDestroyDescriptorPool(impl.device, impl.descriptor_pool, nullptr);
     vkDestroyRenderPass(impl.device, impl.render_pass, nullptr);
     vkDestroySemaphore(impl.device, impl.image_available, nullptr);
     vkDestroySemaphore(impl.device, impl.render_finished, nullptr);

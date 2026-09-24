@@ -478,7 +478,8 @@ void Kernel::schedule(AllegrexContext &ctx) {
         // shape a hang takes when nothing will ever wake them, so the watchdog
         // wants to see this path as much as it wants to see a spin.
         check_for_hang(ctx);
-        const auto next = next_event_us();
+        ClockReason why = ClockReason::Vblank;
+        const auto next = next_event_us(why);
         if (!next || idle_vblanks_ > kIdleVBlankLimit) {
             std::string report = "PSP scheduler deadlock: no runnable thread";
             for (const auto &[uid, thread] : threads_) {
@@ -494,13 +495,22 @@ void Kernel::schedule(AllegrexContext &ctx) {
             runtime_->stop(report);
             return;
         }
-        advance_clock(*next);
+        advance_clock(*next, why);
     }
 }
 
-void Kernel::advance_clock(std::uint64_t target_us) {
+void Kernel::advance_clock(std::uint64_t target_us, ClockReason why) {
     if (target_us <= now_us_) return;
     const std::uint64_t step_us = target_us - now_us_;
+    clock_us_[static_cast<std::size_t>(why)] += step_us;
+    ++clock_steps_[static_cast<std::size_t>(why)];
+    if (why == ClockReason::Deadline) {
+        const Thread *owner = nullptr;
+        if (const auto found = threads_.find(deadline_owner_); found != threads_.end())
+            owner = found->second.get();
+        deadline_by_thread_[(owner != nullptr ? owner->name : std::string("?")) + "/" +
+                            wait_name(deadline_type_)] += step_us;
+    }
     now_us_ = target_us;
     if (pace_to_real_time()) return;
     // Unpaced, idle time costs nothing, so a thread waiting for the network
@@ -516,7 +526,7 @@ void Kernel::advance_clock(std::uint64_t target_us) {
 // unthrottled setting (MGA_UNTHROTTLED), let it free-run instead.
 bool Kernel::real_time_clock_active() const noexcept {
     static const bool windowed = std::getenv("MGA_NO_RENDER") == nullptr;
-    return windowed && !settings::current().unthrottled;
+    return windowed && !settings::current().unthrottled && !fast_forward_;
 }
 
 bool Kernel::pace_to_real_time() {
@@ -555,21 +565,29 @@ bool Kernel::pace_to_real_time() {
     return true;
 }
 
-std::optional<std::uint64_t> Kernel::next_event_us() const {
+std::optional<std::uint64_t> Kernel::next_event_us(ClockReason &why) const {
     std::optional<std::uint64_t> next = next_vblank_us_;
-    const auto consider = [&](std::uint64_t value) {
-        if (!next || value < *next) next = value;
+    why = ClockReason::Vblank;
+    const auto consider = [&](std::uint64_t value, ClockReason reason) {
+        if (!next || value < *next) {
+            next = value;
+            why = reason;
+        }
     };
     for (const auto &[uid, thread] : threads_) {
         (void)uid;
         if (thread->status != ThreadStatus::Waiting) continue;
-        if (thread->wait.deadline_us) consider(*thread->wait.deadline_us);
-        if (thread->wait.type == WaitType::Host) consider(now_us_ + kHostWaitPollUs);
+        if (thread->wait.deadline_us && (!next || *thread->wait.deadline_us < *next)) {
+            deadline_owner_ = uid;
+            deadline_type_ = thread->wait.type;
+        }
+        if (thread->wait.deadline_us) consider(*thread->wait.deadline_us, ClockReason::Deadline);
+        if (thread->wait.type == WaitType::Host) consider(now_us_ + kHostWaitPollUs, ClockReason::HostPoll);
     }
     for (const auto &[uid, timer] : vtimers) {
         (void)uid;
         if (timer.active && timer.handler != 0u && timer.schedule_us >= vtimer_value(timer))
-            consider(now_us_ + (timer.schedule_us - vtimer_value(timer)));
+            consider(now_us_ + (timer.schedule_us - vtimer_value(timer)), ClockReason::VTimer);
     }
     return next;
 }
@@ -687,12 +705,29 @@ void Kernel::calibrate_cpu_scale() {
     hang_reports_ = 0u;
     if (cpu_scale_fixed_) return;
     const std::uint64_t work_us = frame_work_us_;
+    last_work_us_ = work_us;
     frame_work_us_ = 0u;
     // Nothing ran: a frame presented from a loading screen says nothing about
     // how fast this machine executes guest code.
     if (work_us < 50u) return;
     const std::uint64_t target = std::clamp(kTargetWorkUsPerFrame / work_us, kMinCpuScale, kMaxCpuScale);
     cpu_scale_ = std::clamp<std::uint64_t>((cpu_scale_ * 7u + target * 1u) / 8u, kMinCpuScale, kMaxCpuScale);
+}
+
+std::string Kernel::describe_idle_time() const {
+    static const char *kNames[] = {"work", "vblank", "deadline", "vtimer", "hostpoll"};
+    std::string report;
+    for (std::size_t i = 0; i < clock_us_.size(); ++i) {
+        if (clock_us_[i] == 0u) continue;
+        if (!report.empty()) report += ", ";
+        report += std::string(kNames[i]) + " " + std::to_string(clock_us_[i] / 1000u) + " ms in " +
+                  std::to_string(clock_steps_[i]) + " steps";
+    }
+    for (const auto &[who, us] : deadline_by_thread_) {
+        if (us < 1000u) continue;
+        report += " | " + who + " " + std::to_string(us / 1000u) + " ms";
+    }
+    return report.empty() ? "none" : report;
 }
 
 std::string Kernel::describe_threads() const {
@@ -752,7 +787,7 @@ void Kernel::check_for_hang(const AllegrexContext &ctx) {
 void Kernel::on_starvation(AllegrexContext &ctx) {
     if (interrupt_active_ || current_thread() == nullptr) return;
     check_for_hang(ctx);
-    advance_clock(now_us_ + guest_time_for_uninterrupted_work());
+    advance_clock(now_us_ + guest_time_for_uninterrupted_work(), ClockReason::Work);
     process_timers();
     if (interrupts_enabled_ && !pending_interrupts_.empty()) {
         interrupted_context_ = ctx;

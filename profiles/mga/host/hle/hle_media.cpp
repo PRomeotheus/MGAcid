@@ -3,6 +3,8 @@
 // list completion callbacks, blocking audio output); the drawing and the
 // mixing themselves live under gpu/ and audio/.
 #include "hle_common.hpp"
+#include "install/user_data.hpp"
+#include "state/save_state.hpp"
 #include "kernel/scene.hpp"
 
 #include "overlays.hpp"
@@ -15,6 +17,7 @@
 #include "gpu/ge_state.hpp"
 #include "perf/frame_stats.hpp"
 #if defined(MGA_HAS_RENDERER)
+#include "gpu/frame_record.hpp"
 #include "gpu/vulkan_renderer.hpp"
 #include "ui/ui.hpp"
 #endif
@@ -26,6 +29,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <memory>
+#include <sstream>
 #include <vector>
 
 namespace mga {
@@ -38,12 +42,110 @@ constexpr std::uint32_t kAudioSampleRate = 44'100u;
 // MGA_TRACE_DISPLAY=1: how the game paces itself, once a second. Frames the
 // host presents are only as meaningful as the guest calls behind them, and
 // those are what say whether a flip is a frame.
+struct ClockSample {
+    std::uint64_t virtual_us{};
+    std::uint64_t vblanks{};
+};
+
+#if defined(MGA_HAS_RENDERER)
+// The frame being recorded. File scope rather than a MediaState member on
+// purpose: MediaState is written into save states field by field, and this is
+// host-side scratch that means nothing in another session.
+gpu::FrameRecord &frame_record() {
+    static gpu::FrameRecord record;
+    return record;
+}
+
+// The frame before the one being recorded. The extra frame is built from this
+// and the current one, so it has to outlive its own present.
+gpu::FrameRecord &previous_frame() {
+    static gpu::FrameRecord record;
+    return record;
+}
+
+// The frame the game never drew, built at the end of one game frame and shown
+// on the vblank in the middle of the next.
+gpu::FrameRecord &extra_frame() {
+    static gpu::FrameRecord record;
+    return record;
+}
+
+// Half a frame past the newer of the two real frames. Not the midpoint
+// between them: see build_blend for why forwards rather than between.
+constexpr float kExtraFrameAt = 1.5f;
+
+// What the extra present needs, captured while a game frame is being
+// presented and used on the vblank after it. Guest memory is not touched
+// between those two moments -- every guest thread is waiting on that vblank --
+// so the pointer is as good then as it was here.
+struct ExtraFrame {
+    const psprecomp::GuestMemory *memory{};
+    std::uint32_t address{};
+    bool built{};
+};
+
+ExtraFrame &extra() {
+    static ExtraFrame state;
+    return state;
+}
+
+// MGA_SMOOTH: show the window more often than the game computes frames.
+//
+// Ac!d paces itself to every second vblank and takes exactly one simulation
+// step per frame (see the comment on kVBlanksPerFrame), so it cannot be made
+// to produce 60 frames a second -- forcing it to try runs the game at double
+// speed. The frames in between have to be made here instead.
+//
+//   off    what the game does, one present per frame.
+//   double the same frame shown twice. Not smoother; it proves the second
+//          present can happen at all, from where it has to happen, without
+//          disturbing the game.
+//   lerp   an image built from the two real frames either side.
+enum class Smoothing { Off, Double, Lerp };
+
+Smoothing smoothing() {
+    // MGA_SMOOTH=double is a diagnostic rather than a setting: it shows the
+    // same frame twice, which proves the extra present is happening without
+    // changing anything about what is on it. Every other value, and the
+    // setting, mean the real thing. Read every frame, so the menu's toggle
+    // takes effect on the next one.
+    static const bool same_frame_twice = [] {
+        const char *text = std::getenv("MGA_SMOOTH");
+        return text != nullptr && std::string(text) == "double";
+    }();
+    if (same_frame_twice) return Smoothing::Double;
+    return settings::current().frame_smoothing ? Smoothing::Lerp : Smoothing::Off;
+}
+
+// Set when a game frame has been presented and the extra present that follows
+// it has not happened yet. The game flips once every two vblanks, so without
+// this the vblank after the extra present would present a third time.
+bool &extra_present_due() {
+    static bool due = false;
+    return due;
+}
+
+#endif
+
 struct DisplayTrace {
     std::uint64_t set_frame_buf{};   // sceDisplaySetFrameBuf calls
     std::uint64_t set_immediate{};   // ... of them with sync = 0
     std::uint64_t address_changed{}; // ... that named a different buffer
     std::uint64_t vblank_waits{};    // sceDisplayWaitVblankStart(+CB)
+    // Which guest code each vblank wait was called from (by return address).
+    // Two waits per presented frame can be one call site reached twice -- a
+    // loop pacing the game to every second vblank -- or two different places
+    // each waiting once. Those need opposite fixes, and the return address is
+    // the only thing that tells them apart.
+    std::map<std::uint32_t, std::uint64_t> vblank_sites;
+    std::uint64_t extra_presents{};  // presents between the game's own frames
+    std::uint64_t extra_blended{};   // ... that showed a frame built from two real ones
+    gpu::FrameRecord::MatchReport match;    // how well frames line up with their predecessor
+    gpu::FrameRecord::MotionReport motion;  // and how much actually moved between them
+    std::uint64_t ctrl_reads{};      // sceCtrlReadBufferPositive calls
+    std::uint64_t ctrl_blocks{};     // ... of them that had to wait for a sample
     std::uint64_t vblank_base{};
+    ClockSample clock_base{};
     std::chrono::steady_clock::time_point since{};
 };
 
@@ -66,6 +168,7 @@ void report_display_trace() {
     if (trace.since == Clock::time_point{}) {
         trace.since = now;
         trace.vblank_base = kernel().vblank_count();
+        trace.clock_base = {kernel().now_us(), kernel().vblank_count()};
         return;
     }
     const double seconds = std::chrono::duration<double>(now - trace.since).count();
@@ -74,10 +177,76 @@ void report_display_trace() {
               << " (immediate " << static_cast<double>(trace.set_immediate) / seconds << ", new address "
               << static_cast<double>(trace.address_changed) / seconds << ") | vblank waits "
               << static_cast<double>(trace.vblank_waits) / seconds << " | vblanks "
-              << static_cast<double>(kernel().vblank_count() - trace.vblank_base) / seconds
-              << " | cpu scale " << kernel().cpu_scale() << "\n";
+              << static_cast<double>(kernel().vblank_count() - trace.vblank_base) / seconds << " | pad reads "
+              << static_cast<double>(trace.ctrl_reads) / seconds << " (blocked "
+              << static_cast<double>(trace.ctrl_blocks) / seconds << ") | extra presents "
+              << static_cast<double>(trace.extra_presents) / seconds << " (blended "
+              << static_cast<double>(trace.extra_blended) / seconds << ")" << [&] {
+                     using Record = gpu::FrameRecord;
+                     const Record::MatchReport &m = trace.match;
+                     const std::size_t total = m.compared;
+                     std::ostringstream out;
+                     out << " | draws " << static_cast<double>(total) / seconds << ", matched "
+                         << (total != 0u ? 100.0 * static_cast<double>(m.matched) / static_cast<double>(total) : 0.0)
+                         << "%";
+                     if (m.unpaired != 0u)
+                         out << " (" << static_cast<double>(m.unpaired) / seconds << " unpaired)";
+                     // Only the reasons that actually fired, biggest first, so
+                     // a poor rate names the part of the key that is wrong.
+                     std::vector<std::pair<std::size_t, const char *>> reasons;
+                     for (std::size_t i = 0; i < m.reasons.size(); ++i)
+                         if (m.reasons[i] != 0u)
+                             reasons.emplace_back(m.reasons[i], Record::mismatch_name(static_cast<Record::Mismatch>(i)));
+                     std::sort(reasons.begin(), reasons.end(), [](const auto &a, const auto &b) { return a > b; });
+                     for (const auto &[count, name] : reasons)
+                         out << " | " << name << " " << static_cast<double>(count) / seconds;
+                     // What actually moved. Averaged over the draws that were
+                     // paired, not over time, so it reads the same whatever
+                     // the frame rate is: pixels of the PSP's own screen that
+                     // a draw shifted from one frame to the next.
+                     const gpu::FrameRecord::MotionReport &mo = trace.motion;
+                     const auto part = [&out](const char *what, double pixels, std::size_t draws,
+                                              std::size_t moving, double most) {
+                         out << " | " << what << " ";
+                         if (draws == 0u) {
+                             out << "none";
+                             return;
+                         }
+                         out << pixels / static_cast<double>(draws) << " px avg, "
+                             << 100.0 * static_cast<double>(moving) / static_cast<double>(draws) << "% moving, max "
+                             << most;
+                     };
+                     part("motion 3D", mo.blended_pixels, mo.blended_draws, mo.blended_moving, mo.blended_max);
+                     part("2D", mo.screen_pixels, mo.screen_draws, mo.screen_moving, mo.screen_max);
+                     return out.str();
+                 }() << [&] {
+                     std::ostringstream sites;
+                     sites << " | wait sites";
+                     for (const auto &[ra, count] : trace.vblank_sites)
+                         sites << " " << std::hex << std::showbase << ra << std::dec << std::noshowbase << "x"
+                               << static_cast<double>(count) / seconds;
+                     return sites.str();
+                 }()
+#if defined(MGA_HAS_RENDERER)
+              << " | arena peak "
+              << (active_renderer() != nullptr ? active_renderer()->arena_peak_bytes() / 1024u : 0u) << " KB of "
+              << (active_renderer() != nullptr ? active_renderer()->arena_bytes() / 1024u : 0u)
+              << " KB, draws dropped "
+              << (active_renderer() != nullptr ? active_renderer()->dropped_draws() : 0u) << ", record overflow "
+              << frame_record().overflow() << " | blobs "
+              << (active_renderer() != nullptr ? active_renderer()->blob_report() : std::string())
+#endif
+              << " | cpu scale " << kernel().cpu_scale() << ", charged work "
+              << static_cast<double>(kernel().last_work_us()) / 1000.0 << " ms/frame, emulated "
+              << static_cast<double>(kernel().now_us() - trace.clock_base.virtual_us) / 1000.0 / seconds
+              << " ms per real s | idle " << kernel().describe_idle_time() << "\n";
     trace.set_frame_buf = trace.set_immediate = trace.address_changed = trace.vblank_waits = 0u;
+    trace.ctrl_reads = trace.ctrl_blocks = trace.extra_presents = trace.extra_blended = 0u;
+    trace.match = {};
+    trace.motion = {};
+    trace.vblank_sites.clear();
     trace.vblank_base = kernel().vblank_count();
+    trace.clock_base = {kernel().now_us(), kernel().vblank_count()};
     trace.since = now;
 }
 
@@ -180,6 +349,9 @@ struct MediaState {
     DisplayState display;
     std::uint32_t ctrl_cycle{};
     std::uint32_t ctrl_mode{};
+    // Which sample sceCtrlReadBufferPositive last handed out; see the comment
+    // there for why a read is only ever blocked when this is the current one.
+    std::uint64_t ctrl_read_sample{};
     std::map<std::int32_t, GeCallback> ge_callbacks;
     std::int32_t next_ge_callback{};
     std::map<std::uint32_t, GeList> ge_lists;
@@ -225,7 +397,7 @@ void block_transfer(Runtime &rt, const gpu::BlockTransfer &transfer) {
     }
 #if defined(MGA_HAS_RENDERER)
     // Textures already looked up in this list may have changed.
-    if (media().renderer && media().renderer->available()) media().renderer->begin_display_list();
+    if (media().renderer && media().renderer->available()) frame_record().begin_list();
 #endif
 }
 
@@ -250,10 +422,8 @@ void run_ge_list(Runtime &rt, std::uint32_t id) {
     });
 #if defined(MGA_HAS_RENDERER)
     if (media().renderer && media().renderer->available()) {
-        gpu::VulkanRenderer &renderer = *media().renderer;
-        const psprecomp::GuestMemory &memory = rt.memory();
-        renderer.begin_display_list();
-        media().ge.set_draw_sink([&renderer, &memory](const gpu::DrawCall &call) { renderer.submit(call, memory); });
+        frame_record().begin_list();
+        media().ge.set_draw_sink([](const gpu::DrawCall &call) { frame_record().add(call); });
     }
 #endif
     media().ge.set_transfer_sink([&rt](const gpu::BlockTransfer &transfer) { block_transfer(rt, transfer); });
@@ -321,12 +491,24 @@ void publish_shadow_casters(Runtime &rt) {
         // character up on a platform inside the same cell got a shadow down
         // at the cell's base, buried inside the platform and invisible. The
         // character's own height tracks them up and down, so it is used
-        // instead. The cost is that the idle animation moves the shadow with
-        // the breathing, by about twelve units out of two thousand.
+        // instead. The cost is that the animation moves the shadow with the
+        // character, by about twelve units out of two thousand.
+        //
+        // That cost turned out to be the whole of the flicker. Twelve units of
+        // animated bob around a floor the disc is otherwise flush with means the
+        // disc crosses the floor plane and back on every step: on the down beat
+        // it is behind the floor, the depth test rejects it, and it disappears
+        // for those frames. Standing still it is steady, which is why the
+        // flicker only showed up while walking.
+        //
+        // So the disc is lifted clear by more than the bob can reach. Thirty
+        // units is one and a half percent of a cell -- far too little to see as
+        // a gap under a character, and comfortably more than twelve.
         constexpr float kFootDrop = 1000.0f;
+        constexpr float kGroundLift = 30.0f;
         constexpr float kRadius = 620.0f;
         for (const scene::Character &character : view.characters)
-            casters.push_back({character.position, character.position[1] - kFootDrop, kRadius});
+            casters.push_back({character.position, character.position[1] - kFootDrop + kGroundLift, kRadius});
     }
     media().renderer->set_shadow_casters(view.world_to_clip, casters);
 }
@@ -338,6 +520,7 @@ void present_frame(Runtime &rt) {
 #if defined(MGA_HAS_RENDERER)
     publish_shadow_casters(rt);
     if (!media().renderer || !media().renderer->available()) {
+        frame_record().clear();
         perf::end_frame(kernel().now_us());
         kernel().calibrate_cpu_scale();
         report_display_trace();
@@ -359,9 +542,39 @@ void present_frame(Runtime &rt) {
         renderer.upload_frame(address, rt.memory().raw_pointer(address, bytes), display.width, display.height,
                               display.buffer_width);
     }
+    // The frame's draws were recorded rather than drawn as they arrived; this
+    // is where they are actually drawn. Nothing about the picture changes --
+    // same draws, same order, same list boundaries -- but the frame now still
+    // exists after it has been shown, which is what an in-between frame has to
+    // be built from.
+    frame_record().replay(renderer, rt.memory());
     ui::draw_over_game();
     renderer.write_back_frame(rt.memory());
     renderer.present(address);
+    // How much of this frame was also in the one before it. Counted before the
+    // swap, while the two are still this frame and the one before.
+    {
+        static gpu::FrameRecord::Alignment alignment;
+        gpu::FrameRecord::align(previous_frame(), frame_record(), alignment);
+        DisplayTrace &trace = display_trace();
+        trace.match.compared += alignment.report.compared;
+        trace.match.matched += alignment.report.matched;
+        trace.match.unpaired += alignment.report.unpaired;
+        for (std::size_t i = 0; i < trace.match.reasons.size(); ++i)
+            trace.match.reasons[i] += alignment.report.reasons[i];
+        gpu::FrameRecord::measure_motion(previous_frame(), frame_record(), alignment, trace.motion);
+    }
+    // Built here, while both real frames are still in hand; drawn on the
+    // vblank after this one.
+    extra().memory = &rt.memory();
+    extra().address = address;
+    extra().built = smoothing() == Smoothing::Lerp &&
+                    gpu::FrameRecord::build_blend(previous_frame(), frame_record(), kExtraFrameAt, extra_frame());
+    extra_present_due() = true;
+    // This frame becomes the previous one; what was the previous one becomes
+    // the pool the next frame records into, so neither allocates again.
+    previous_frame().swap(frame_record());
+    frame_record().clear();
     perf::add_render_time(perf::Clock::now() - present_start);
     // A frame ends when its image has been handed to the swapchain.
     perf::end_frame(kernel().now_us());
@@ -381,6 +594,35 @@ void present_frame(Runtime &rt) {
         if (renderer.capture_frame(path))
             std::cout << "[render] frame " << renderer.frames_presented() << " (" << renderer.draws_submitted()
                       << " draws) -> " << path << "\n";
+    }
+    // Fast forward follows the key every frame rather than being switched on and
+    // off, so letting go is as immediate as pressing and nothing can be left in
+    // the wrong state.
+    kernel().set_fast_forward(ui::fast_forward_held());
+    if (ui::screenshot_requested()) {
+        std::error_code code;
+        const auto folder = install::user_data_directory() / "screenshots";
+        std::filesystem::create_directories(folder, code);
+        if (code) {
+            std::cout << "[render] cannot make a screenshots folder: " << code.message() << "\n";
+        } else {
+            // Numbered by the frame rather than the clock: two screenshots in the
+            // same second would otherwise be one file.
+            const auto name = "shot_" + std::to_string(renderer.frames_presented()) + ".bmp";
+            renderer.capture_window(install::path_to_utf8(folder / name));
+            std::cout << "[render] screenshot -> " << install::path_to_utf8(folder / name) << "\n";
+        }
+    }
+
+    // A function key asked for a save state. Recorded on the way past rather
+    // than carried out: this runs inside present_frame, and the call that owns
+    // the guest context is the one above it. It performs the request the moment
+    // this returns, which is the dispatch boundary a state needs.
+    {
+        unsigned slot = 0u;
+        bool load = false;
+        if (ui::state_hotkey(slot, load))
+            state::request(load ? state::Request::Load : state::Request::Save, slot);
     }
     if (!renderer.pump_events()) {
         rt.stop("window closed");
@@ -412,6 +654,41 @@ void present_frame(Runtime &rt) {
 #endif
 }
 
+// MGA_60FPS=1: lift the game's own 30 fps cap.
+//
+// Ac!d paces itself in the loop at 0x0887B308, which reads as:
+//
+//     sceDisplayWaitVblankStart();
+//     elapsed = *kVBlanksThisFrame;                     // 0x089B7508
+//     while (elapsed < *kVBlanksPerFrame)               // 0x089E111C
+//         sceDisplayWaitVblankStart();
+//     *kVBlanksPerFrame = clamp(elapsed, 2, 6);
+//     *kVBlanksThisFrame = 0;
+//
+// So the cadence for the next frame is whatever the last one cost, in whole
+// vblanks, and that clamp is the frame rate: a floor of two vblanks is 30 fps
+// and can never be anything else, and a ceiling of six means a frame that
+// overruns falls to 10 rather than tearing. Nothing else in the game reads
+// either variable -- they belong to this loop alone -- so writing the floor
+// down to one vblank changes the game's pacing and nothing else about it.
+//
+// What that does NOT settle is whether the simulation advances by a fixed step
+// per frame or by elapsed time. If it is fixed, this runs the game at double
+// speed rather than at 60 fps, and the honest fix is a much larger one. The
+// clamp's own shape hints at fixed: a game scaling by elapsed time would have
+// no reason to prefer a steady slow cadence over a variable one. Cheaper to
+// try it than to argue about it.
+constexpr std::uint32_t kVBlanksPerFrame = 0x089E111Cu;
+
+void raise_frame_rate_cap(Runtime &rt) {
+    static const bool enabled = std::getenv("MGA_60FPS") != nullptr;
+    if (!enabled) return;
+    // Written on the way into every vblank wait, which is always just before
+    // the loop reads it, so the value the game wrote a moment ago never gets
+    // the chance to take effect.
+    rt.memory().store32(kVBlanksPerFrame, 1u);
+}
+
 void register_display_ctrl(HleRegistrar &hle) {
     hle.add("sceDisplay", "sceDisplaySetMode", [](Runtime &, AllegrexContext &ctx) {
         media().display.mode = arg(ctx, 0);
@@ -434,6 +711,17 @@ void register_display_ctrl(HleRegistrar &hle) {
         display.buffer_width = arg(ctx, 1);
         display.pixel_format = arg(ctx, 2);
         if (should_present(display, previous)) present_frame(rt);
+        // The one place a save state is taken or put back. The display call is
+        // reached from the outer dispatch loop and holds the live context, so
+        // between this call and the next the host stack carries no guest frames
+        // -- which is the only kind of moment the whole of the guest is in its
+        // memory and its contexts and nowhere else.
+        //
+        // A load returns true: `ctx` now belongs to the restored session, and
+        // finishing this call on it would set a return value on a thread that
+        // never made the call. The dispatcher carries on from the restored
+        // program counter instead.
+        if (state::run_pending(rt, ctx)) return;
         kernel().finish(ctx, 0u);
     });
     // Early titles pace themselves on the vblank instead of on SetFrameBuf.
@@ -445,7 +733,9 @@ void register_display_ctrl(HleRegistrar &hle) {
         kernel().finish(ctx, 0u);
     });
     hle.add("sceDisplay", "sceDisplayWaitVblankStart", [](Runtime &rt, AllegrexContext &ctx) {
+        raise_frame_rate_cap(rt);
         ++display_trace().vblank_waits;
+        ++display_trace().vblank_sites[ctx.gpr[31]];
         // Once a frame is the right cadence to watch the scene change.
         scene::trace(rt);
         WaitState wait{};
@@ -453,7 +743,9 @@ void register_display_ctrl(HleRegistrar &hle) {
         kernel().block(ctx, wait, 0u);
     });
     hle.add("sceDisplay", "sceDisplayWaitVblankStartCB", [](Runtime &rt, AllegrexContext &ctx) {
+        raise_frame_rate_cap(rt);
         ++display_trace().vblank_waits;
+        ++display_trace().vblank_sites[ctx.gpr[31]];
         scene::trace(rt);
         (void)kernel().deliver_callbacks();
         WaitState wait{};
@@ -479,7 +771,18 @@ void register_display_ctrl(HleRegistrar &hle) {
             std::cout << "[pad] sceCtrlSetSamplingMode " << media().ctrl_mode << "\n";
         kernel().finish(ctx, previous);
     });
-    // Reading the controller buffer blocks until the next sample (vblank).
+    // Reading the controller buffer takes whatever the sampler has put there
+    // since the last read, and blocks only when there is nothing -- that is,
+    // when the caller has got ahead of the sampler by reading twice inside one
+    // vblank. It is not a "wait for the next sample" call.
+    //
+    // Blocking on every read looks equivalent for a game that reads once a
+    // frame, and is what this did until now. It is not equivalent: that game
+    // then spends one vblank in the read and a second in its own
+    // sceDisplayWaitVblankStart, so two vblanks pass per frame and it runs at
+    // half the refresh rate however little work it has to do. That was the
+    // whole of this port's 30 fps -- the profile showed the CPU idle for 22 of
+    // every 33 ms and the main thread never sleeping once.
     hle.add("sceCtrl", "sceCtrlReadBufferPositive", [](Runtime &rt, AllegrexContext &ctx) {
         const std::uint32_t address = arg(ctx, 0);
         const std::uint32_t count = std::clamp<std::uint32_t>(arg(ctx, 1), 1u, 64u);
@@ -513,6 +816,18 @@ void register_display_ctrl(HleRegistrar &hle) {
             memory.store8(entry + 11u, right_y);
             for (std::uint32_t j = 12u; j < 16u; ++j) memory.store8(entry + j, 0u);
         }
+        ++display_trace().ctrl_reads;
+        // One sample per vblank, so the vblank counter is the sample counter.
+        // Not carried in a save state: it is a cursor into a stream of samples
+        // that no longer exists on the other side of a load, and starting it
+        // fresh costs one read a single vblank, once.
+        const std::uint64_t sample = kernel().vblank_count();
+        if (sample != media().ctrl_read_sample) {
+            media().ctrl_read_sample = sample;
+            kernel().finish(ctx, count);
+            return;
+        }
+        ++display_trace().ctrl_blocks;
         WaitState wait{};
         wait.type = WaitType::VBlank;
         kernel().block(ctx, wait, count);
@@ -810,6 +1125,40 @@ gpu::VulkanRenderer *active_renderer() {
     return media().renderer && media().renderer->available() ? media().renderer.get() : nullptr;
 }
 
+// The extra present, from the vblank between two of the game's own flips.
+//
+// Why here rather than from a timer or the window thread: this runs inside the
+// kernel's vblank, which happens while every guest thread is waiting and
+// before any of them is woken. Guest memory cannot be in a half-written state
+// at that moment, and no display list is part-walked, which makes it the only
+// point in the frame where the renderer can be handed work that did not come
+// from the game.
+void present_between_frames() {
+    if (smoothing() == Smoothing::Off || !extra_present_due()) return;
+    extra_present_due() = false;
+    if (!media().renderer || !media().renderer->available()) return;
+    gpu::VulkanRenderer &renderer = *media().renderer;
+    // Deliberately not ui::draw_over_game(): it ticks the input script and
+    // advances the menu, and doing that twice per game frame would run both at
+    // double speed -- the very thing this whole exercise exists to avoid. So
+    // while the interface is up there is no way to put it on this frame, and
+    // the frame is not worth showing without it: a menu that appears on every
+    // second image is worse than a menu at thirty.
+    const bool blended = smoothing() == Smoothing::Lerp && extra().built && extra().memory != nullptr &&
+                         !ui::overlay_drawn();
+    if (blended) {
+        extra_frame().replay(renderer, *extra().memory);
+        renderer.present(extra().address);
+    } else {
+        // Nothing new to show: the same image again. Holds the present rate
+        // steady, which matters more than it sounds -- a window that presents
+        // 60, 30, 60, 30 judders worse than one that presents 30.
+        renderer.present_ui(true);
+    }
+    ++display_trace().extra_presents;
+    if (blended) ++display_trace().extra_blended;
+}
+
 gpu::VulkanRenderer *ensure_renderer() {
     static bool tried = false;
     if (tried) return active_renderer();
@@ -831,8 +1180,149 @@ gpu::VulkanRenderer *ensure_renderer() {
     }
     media().renderer = std::move(renderer);
     ui::attach(*media().renderer);
+    kernel().add_vblank_hook(present_between_frames);
     return media().renderer.get();
 }
 #endif
+
+
+// ---------------------------------------------------------------------------
+// Save states
+
+std::string why_no_media_state() {
+    // A display list that has not finished. Lists are run to completion inside
+    // the call that starts them, so between frames there is none in flight --
+    // but a stalled list is one the game means to add to, and its GE state is
+    // part way through rather than at a boundary.
+    for (const auto &[id, list] : media().ge_lists) {
+        (void)id;
+        if (!list.done) return "a display list is still being drawn";
+    }
+    return {};
+}
+
+void write_media_state(psprecomp::SnapshotWriter &out) {
+    MediaState &state = media();
+    out.u32(state.display.mode);
+    out.u32(state.display.width);
+    out.u32(state.display.height);
+    out.u32(state.display.framebuffer);
+    out.u32(state.display.buffer_width);
+    out.u32(state.display.pixel_format);
+    out.u32(state.display.presented);
+    out.boolean(state.display.drawn_since_present);
+    // Not display.last_present: it is a host clock reading used to space
+    // presents, meaningless in another session and re-established by the next
+    // frame.
+
+    out.u32(state.ctrl_cycle);
+    out.u32(state.ctrl_mode);
+
+    out.u32(static_cast<std::uint32_t>(state.ge_callbacks.size()));
+    for (const auto &[id, callback] : state.ge_callbacks) {
+        out.i32(id);
+        out.u32(callback.signal_function);
+        out.u32(callback.signal_argument);
+        out.u32(callback.finish_function);
+        out.u32(callback.finish_argument);
+    }
+    out.i32(state.next_ge_callback);
+
+    out.u32(static_cast<std::uint32_t>(state.ge_lists.size()));
+    for (const auto &[id, list] : state.ge_lists) {
+        out.u32(id);
+        out.u32(list.pc);
+        out.u32(list.stall);
+        out.i32(list.callback);
+        out.boolean(list.done);
+    }
+    out.u32(state.next_ge_list);
+
+    for (const AudioChannel &channel : state.audio) {
+        out.boolean(channel.reserved);
+        out.u32(channel.samples);
+        out.u32(channel.format);
+        out.u64(channel.queued_until_us);
+        out.u64(channel.cursor);
+    }
+
+    state.ge.write_state(out);
+}
+
+bool read_media_state(psprecomp::SnapshotReader &in) {
+    MediaState &state = media();
+    DisplayState display{};
+    display.mode = in.u32();
+    display.width = in.u32();
+    display.height = in.u32();
+    display.framebuffer = in.u32();
+    display.buffer_width = in.u32();
+    display.pixel_format = in.u32();
+    display.presented = in.u32();
+    display.drawn_since_present = in.boolean();
+    display.last_present = std::chrono::steady_clock::now();
+    if (!in.ok()) return false;
+
+    const std::uint32_t ctrl_cycle = in.u32();
+    const std::uint32_t ctrl_mode = in.u32();
+
+    std::map<std::int32_t, GeCallback> ge_callbacks;
+    std::uint32_t count = in.u32();
+    if (!in.ok() || count > in.remaining() / sizeof(std::uint32_t)) {
+        in.fail();
+        return false;
+    }
+    for (std::uint32_t i = 0; i < count; ++i) {
+        const std::int32_t id = in.i32();
+        GeCallback callback{};
+        callback.signal_function = in.u32();
+        callback.signal_argument = in.u32();
+        callback.finish_function = in.u32();
+        callback.finish_argument = in.u32();
+        ge_callbacks.emplace(id, callback);
+    }
+    const std::int32_t next_ge_callback = in.i32();
+
+    std::map<std::uint32_t, GeList> ge_lists;
+    count = in.u32();
+    if (!in.ok() || count > in.remaining() / sizeof(std::uint32_t)) {
+        in.fail();
+        return false;
+    }
+    for (std::uint32_t i = 0; i < count; ++i) {
+        const std::uint32_t id = in.u32();
+        GeList list{};
+        list.pc = in.u32();
+        list.stall = in.u32();
+        list.callback = in.i32();
+        list.done = in.boolean();
+        ge_lists.emplace(id, list);
+    }
+    const std::uint32_t next_ge_list = in.u32();
+
+    std::array<AudioChannel, 8> audio{};
+    for (AudioChannel &channel : audio) {
+        channel.reserved = in.boolean();
+        channel.samples = in.u32();
+        channel.format = in.u32();
+        channel.queued_until_us = in.u64();
+        channel.cursor = in.u64();
+    }
+    if (!in.ok()) return false;
+
+    // The GE last, and straight into place: it owns its own failure and there
+    // is nothing after it to undo.
+    if (!state.ge.read_state(in)) return false;
+
+    state.display = display;
+    state.ctrl_cycle = ctrl_cycle;
+    state.ctrl_mode = ctrl_mode;
+    state.ge_callbacks = std::move(ge_callbacks);
+    state.next_ge_callback = next_ge_callback;
+    state.ge_lists = std::move(ge_lists);
+    state.next_ge_list = next_ge_list;
+    state.audio = audio;
+    return true;
+}
 
 } // namespace mga

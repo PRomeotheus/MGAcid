@@ -3,6 +3,8 @@
 #include "psprecomp/allegrex_context.hpp"
 #include "psprecomp/guest_memory.hpp"
 
+#include <algorithm>
+
 namespace psprecomp {
 namespace {
 
@@ -51,6 +53,19 @@ void write_region(SnapshotWriter &out, const GuestMemory &memory, const Region &
         return false;
     }
     return in.memory(bytes, region.size);
+}
+
+// The staged counterpart of read_region: the same framing, into a buffer of the
+// region's size rather than into the guest.
+[[nodiscard]] bool read_region_staged(SnapshotReader &in, const Region &region, std::vector<std::uint8_t> &bytes) {
+    const std::uint32_t base = in.u32();
+    const std::uint64_t size = in.u64();
+    if (!in.ok() || base != region.base || size != static_cast<std::uint64_t>(region.size)) {
+        in.fail();
+        return false;
+    }
+    bytes.assign(region.size, static_cast<std::uint8_t>(0));
+    return in.memory(bytes.data(), bytes.size());
 }
 
 } // namespace
@@ -118,6 +133,25 @@ bool read_machine(SnapshotReader &in, GuestMemory &memory, AllegrexContext &cont
     if (!read_region(in, memory, vram_region(memory))) return false;
     if (!read_region(in, memory, scratchpad_region(memory))) return false;
     return read_context(in, context);
+}
+
+bool read_machine_staged(SnapshotReader &in, const GuestMemory &memory, StagedMachine &staged) {
+    if (!read_region_staged(in, ram_region(memory), staged.ram)) return false;
+    if (!read_region_staged(in, vram_region(memory), staged.vram)) return false;
+    if (!read_region_staged(in, scratchpad_region(memory), staged.scratchpad)) return false;
+    return read_context(in, staged.context);
+}
+
+void apply_machine(GuestMemory &memory, AllegrexContext &context, const StagedMachine &staged) {
+    const auto put = [&memory](const Region &region, const std::vector<std::uint8_t> &bytes) {
+        std::uint8_t *destination = memory.raw_pointer(region.base, region.size);
+        if (destination == nullptr || bytes.size() != region.size) return;
+        std::copy(bytes.begin(), bytes.end(), destination);
+    };
+    put(ram_region(memory), staged.ram);
+    put(vram_region(memory), staged.vram);
+    put(scratchpad_region(memory), staged.scratchpad);
+    context = staged.context;
 }
 
 } // namespace psprecomp

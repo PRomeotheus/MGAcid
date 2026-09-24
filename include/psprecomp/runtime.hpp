@@ -66,6 +66,19 @@ void set_runtime_thread_identity(std::int32_t uid, const std::string &name) noex
 [[nodiscard]] std::int32_t runtime_thread_uid() noexcept;
 [[nodiscard]] const char *runtime_thread_name() noexcept;
 [[nodiscard]] std::uint32_t runtime_dispatch_pc() noexcept;
+// Declares that whatever the current caller was in the middle of is no longer
+// something it may return into, even though the thread has not changed.
+//
+// The one thing that does this is restoring a save state. A host call captures a
+// token before it runs and, if the token still matches afterwards, continues the
+// caller where it left off. A restore replaces the guest underneath that call:
+// the thread it returns to may have the same uid and still be somewhere else
+// entirely, so the return address the caller remembers belongs to a session that
+// no longer exists. Bumping the generation makes every outstanding token stale,
+// and the existing check in each import wrapper then leaves the restored program
+// counter alone instead of overwriting it.
+void invalidate_runtime_execution_context() noexcept;
+
 [[nodiscard]] RuntimeExecutionContextToken capture_runtime_execution_context() noexcept;
 [[nodiscard]] bool runtime_execution_context_matches(RuntimeExecutionContextToken token) noexcept;
 // Hot direct-chain guard.  The generation increments on every PSP thread

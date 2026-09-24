@@ -181,6 +181,32 @@ bool Layer::handle_event(const SDL_Event &event) {
             if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat) escape_pending_ = now;
             return true;
         }
+        // Save states on F1 to F4, one per slot.
+        //
+        // Plain saves and shift loads, rather than the other way round. Both
+        // can lose something, so the modifier goes on the worse one: a stray
+        // save costs whatever was in that slot, while a stray load costs the
+        // session being played, which is the thing that cannot be got back.
+        //
+        // Only while the game has input. With the interface up the keys belong
+        // to it, and the menu has its own rows for this.
+        if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat && !interactive_ &&
+            settings::current().state_hotkeys && event.key.key >= SDLK_F1 && event.key.key <= SDLK_F4) {
+            const auto slot = static_cast<unsigned>(event.key.key - SDLK_F1);
+            const bool load = (event.key.mod & SDL_KMOD_SHIFT) != 0u;
+            state_hotkey_ = std::make_pair(slot, load);
+            // Swallowed, so a key that also happens to be mapped to a pad
+            // button does not do both things at once.
+            return true;
+        }
+        // Fast forward is polled in fast_forward() rather than tracked here, but
+        // the key is still swallowed so it cannot reach anything else.
+        if (!interactive_ && event.key.key == SDLK_TAB) return true;
+        if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat && !interactive_ &&
+            event.key.key == SDLK_F12) {
+            screenshot_ = true;
+            return true;
+        }
         if (event.type == SDL_EVENT_KEY_DOWN) device_ = InputDevice::Keyboard;
         break;
     case SDL_EVENT_MOUSE_BUTTON_DOWN:
@@ -228,6 +254,26 @@ void Layer::resolve_escape() {
 bool Layer::take_menu_toggle() {
     resolve_escape();
     return std::exchange(menu_toggle_, false);
+}
+
+bool Layer::fast_forward() const {
+    // Only with the window focused. Without that check the game would run fast
+    // while the player held tab in another application entirely.
+    if (renderer_ == nullptr) return false;
+    SDL_Window *window = renderer_->window();
+    if (window == nullptr || (SDL_GetWindowFlags(window) & SDL_WINDOW_INPUT_FOCUS) == 0u) return false;
+    const bool *keys = SDL_GetKeyboardState(nullptr);
+    return keys != nullptr && keys[SDL_SCANCODE_TAB];
+}
+
+bool Layer::take_screenshot_request() { return std::exchange(screenshot_, false); }
+
+bool Layer::take_state_hotkey(unsigned &slot, bool &load) {
+    if (!state_hotkey_) return false;
+    slot = state_hotkey_->first;
+    load = state_hotkey_->second;
+    state_hotkey_.reset();
+    return true;
 }
 
 bool Layer::take_back() {

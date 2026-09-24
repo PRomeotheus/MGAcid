@@ -496,4 +496,92 @@ void register_atrac(HleRegistrar &hle) {
     register_atrac_functions(hle);
 }
 
+
+// ---------------------------------------------------------------------------
+// Save states
+
+std::string why_no_atrac_state() {
+    // Nothing. Unlike a video, a music track IS rebuildable: everything the
+    // decoder was opened from -- the ATRAC3 header and the encoded data -- sits
+    // in the guest's own buffer, which a state restores along with the rest of
+    // memory. So the host keeps only where it had got to, and opens the decoder
+    // again on the way back in.
+    //
+    // That is not a nicety. Music plays for as long as the game is running, so a
+    // rule that refused a save while any track was open would refuse every save
+    // a player would ever want to take.
+    return {};
+}
+
+void write_atrac_state(psprecomp::SnapshotWriter &out) {
+    const auto &table = contexts();
+    std::uint32_t live = 0u;
+    for (const auto &entry : table)
+        if (entry) ++live;
+    out.u32(live);
+    for (std::uint32_t id = 0; id < table.size(); ++id) {
+        const AtracContext *context = table[id].get();
+        if (context == nullptr) continue;
+        out.u32(id);
+        // The buffer and its size are all that is needed to rebuild the track
+        // and the decoder, because parse_header reads them out of guest memory.
+        out.u32(context->buffer);
+        out.u32(context->buffer_size);
+        out.i32(context->loop_num);
+        out.i32(context->position);
+        out.u64(static_cast<std::uint64_t>(context->next_frame));
+        // Not the cached frame: it is a copy of what the decoder would produce
+        // anyway, and dropping it costs one frame of re-decoding.
+    }
+}
+
+bool read_atrac_state(psprecomp::SnapshotReader &in, const psprecomp::GuestMemory &memory) {
+    auto &table = contexts();
+    const std::uint32_t live = in.u32();
+    if (!in.ok() || live > table.size()) {
+        in.fail();
+        return false;
+    }
+    // Built aside and swapped in, so a state that turns out to be damaged part
+    // way through does not leave the game with half its music gone.
+    std::array<std::unique_ptr<AtracContext>, kMaxAtracIds> restored;
+    for (std::uint32_t i = 0; i < live; ++i) {
+        const std::uint32_t id = in.u32();
+        const std::uint32_t buffer = in.u32();
+        const std::uint32_t buffer_size = in.u32();
+        const std::int32_t loop_num = in.i32();
+        const std::int32_t position = in.i32();
+        const auto next_frame = static_cast<std::int64_t>(in.u64());
+        if (!in.ok() || id >= table.size() || restored[id]) {
+            in.fail();
+            return false;
+        }
+        auto context = std::make_unique<AtracContext>();
+        if (parse_header(memory, buffer, buffer_size, context->track)) {
+            // The buffer no longer holds the track it did when the state was
+            // written. Not a reason to refuse the whole restore: the game gets
+            // a silent id, which is what it would get from a bad stream.
+            log_once("atrac-state-header", "[atrac] a track in this state no longer parses; it will be silent");
+            continue;
+        }
+        const TrackInfo &track = context->track;
+        if (!context->decoder.open(track.codec, track.channels, track.block_align, track.extradata)) {
+            log_once("atrac-state-open", "[atrac] a track in this state could not be decoded again");
+            continue;
+        }
+        context->buffer = buffer;
+        context->buffer_size = buffer_size;
+        context->loop_num = loop_num;
+        context->position = position;
+        context->next_frame = next_frame;
+        // Nothing is cached yet, so the next read decodes rather than trusting
+        // a frame belonging to the session being replaced.
+        context->cached_frame = -1;
+        restored[id] = std::move(context);
+    }
+    if (!in.ok()) return false;
+    table = std::move(restored);
+    return true;
+}
+
 } // namespace mga

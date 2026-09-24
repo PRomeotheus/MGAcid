@@ -65,6 +65,7 @@ constexpr std::uint32_t kUtilityData = 0x5D8u;
 constexpr std::uint32_t kKey = 0x5DCu;  // char[16], firmware 2.00 and later
 constexpr std::uint32_t kSecureVersion = 0x5ECu;
 constexpr std::uint32_t kMinimumSizeWithKey = 0x5ECu;
+constexpr std::uint32_t kSizeInfo = 0x5FCu;  // GETSIZE (22) only
 } // namespace param
 
 enum Mode : std::uint32_t {
@@ -79,6 +80,7 @@ enum Mode : std::uint32_t {
     kSizes = 8,
     kAutoDelete = 9,
     kSingleDelete = 10,
+    kGetSize = 22,
 };
 
 const char *mode_name(std::uint32_t mode) {
@@ -103,6 +105,7 @@ constexpr std::uint32_t kDeleteNoData = 0x80110347u;
 constexpr std::uint32_t kSaveAccessError = 0x80110385u;
 constexpr std::uint32_t kSaveParam = 0x80110388u;
 constexpr std::uint32_t kSizesNoData = 0x801103C7u;
+constexpr std::uint32_t kReadWriteNoData = 0x80110327u;
 } // namespace result
 
 constexpr std::uint32_t kClusterSize = 0x8000u;
@@ -343,6 +346,26 @@ std::uint32_t do_sizes(psprecomp::GuestMemory &memory, std::uint32_t params) {
     return outcome;
 }
 
+// GETSIZE: free space, and the space the files listed in the size-info block
+// would need beyond it (never any: the stick reports ample room). Fails with
+// "no data" when the save folder does not exist yet.
+std::uint32_t do_getsize(psprecomp::GuestMemory &memory, std::uint32_t params, const std::string &save_name) {
+    if (const std::uint32_t info = memory.load32(params + param::kSizeInfo); info != 0u) {
+        const std::uint64_t free_kb = static_cast<std::uint64_t>(kClusterSize) * kFreeClusters / 1024u;
+        memory.store32(info + 16u, kClusterSize);
+        memory.store32(info + 20u, kFreeClusters);
+        memory.store32(info + 24u, static_cast<std::uint32_t>(free_kb));
+        write_size_string(memory, info + 28u, free_kb);
+        memory.store32(info + 36u, 0u);
+        write_size_string(memory, info + 40u, 0u);
+        memory.store32(info + 48u, 0u);
+        write_size_string(memory, info + 52u, 0u);
+    }
+    std::error_code ec;
+    const auto folder = savedata::save_folder(state().memory_stick, files_for(memory, params, save_name));
+    return std::filesystem::is_directory(folder, ec) ? result::kOk : result::kReadWriteNoData;
+}
+
 // Picks the save a list dialog would land on when the player just confirms:
 // for loading and deleting the first listed save that exists, for saving the
 // first listed name.
@@ -388,6 +411,8 @@ std::uint32_t run_request(psprecomp::GuestMemory &memory, std::uint32_t params) 
         return do_delete(memory, params, save_name);
     case kSizes:
         return do_sizes(memory, params);
+    case kGetSize:
+        return do_getsize(memory, params, save_name);
     default:
         // Not used by this game. Report a parameter error so the guest takes
         // its failure path instead of reading results that were never written.

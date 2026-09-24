@@ -234,6 +234,13 @@ if(MGA_RENDERER)
         "${CMAKE_CURRENT_BINARY_DIR}/generated_version"
         "${MGA_PROFILE_DIR}/third_party/imgui")
     target_link_libraries(MGAcid PRIVATE SDL3::SDL3 Vulkan::Vulkan)
+    # The SDL3 DLL the build linked against goes next to the executable, so
+    # the program never picks up another architecture's copy by hand.
+    if(WIN32)
+        add_custom_command(TARGET MGAcid POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL3::SDL3> $<TARGET_FILE_DIR:MGAcid>
+            COMMENT "Copying SDL3.dll next to MGAcid")
+    endif()
 endif()
 # The host only: the generated code never sees FFmpeg.
 mga_use_ffmpeg(MGAcid)

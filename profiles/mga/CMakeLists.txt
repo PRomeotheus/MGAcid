@@ -123,6 +123,7 @@ set(MGA_HOST_SOURCES
     host/kernel/call_watch.cpp
     host/kernel/sound_paths.cpp
     host/kernel/module_loader.cpp
+    host/kernel/module_sweep.cpp
     host/hle/hle_common.cpp
     host/hle/hle_threadman.cpp
     host/hle/hle_sysmem.cpp

@@ -237,6 +237,24 @@ void Menu::video() {
         renderer().set_keep_aspect(s.keep_aspect);
         settings::save();
     }
+    {
+        RowOptions o = options_for(
+            "video.pixel_perfect",
+            "Shows the picture at a whole multiple of the PSP's 480x272 rather than at whatever fraction of the "
+            "window fits. An uneven scale has to give some rows and columns one more screen pixel than their "
+            "neighbours, which is what makes straight lines and small text look uneven; a whole multiple gives "
+            "every pixel the same square. The picture is smaller for it -- on a 1080p screen the largest whole "
+            "multiple is three, not the 3.97 that would fill the height -- so it is a trade rather than a "
+            "straight win. For a picture with no resampling at all, set the render resolution to the same "
+            "multiple.");
+        o.disabled = !s.keep_aspect;
+        if (o.disabled) o.note = "needs Original aspect";
+        if (toggle_row("Pixel-perfect scaling", s.pixel_perfect && s.keep_aspect, o)) {
+            s.pixel_perfect = !s.pixel_perfect;
+            renderer().set_pixel_perfect(s.pixel_perfect);
+            settings::save();
+        }
+    }
     if (choice_row("Scaling filter", s.sharp_screen ? "Sharp" : "Smooth",
                    options_for("video.sharp_screen", "How the finished picture is scaled to the window: smooth "
                                                      "(bilinear) or sharp (nearest pixel)."))) {
@@ -491,6 +509,7 @@ void Menu::video() {
         renderer().set_fullscreen(s.fullscreen);
         renderer().set_window_scale(s.window_scale);
         renderer().set_keep_aspect(s.keep_aspect);
+        renderer().set_pixel_perfect(s.pixel_perfect);
         renderer().set_sharp_screen(s.sharp_screen);
         renderer().set_sharp_textures(s.sharp_textures);
         renderer().set_smooth_textures(s.smooth_textures);

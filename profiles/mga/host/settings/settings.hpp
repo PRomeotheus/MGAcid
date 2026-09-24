@@ -30,6 +30,9 @@ struct Settings {
     PresentMode present_mode{PresentMode::Fifo};
     bool keep_aspect{true};            // letterbox rather than stretch to the window
     bool sharp_screen{};               // nearest instead of linear scaling to the window
+    // Show the frame at a whole multiple of 480x272 rather than at whatever
+    // fraction fills the window. Needs keep_aspect.
+    bool pixel_perfect{};
     bool sharp_textures{};             // nearest instead of linear texture sampling
     bool smooth_textures{};            // mipmaps and anisotropic filtering, which the PSP had no room for
     std::uint32_t texture_scale{1u};   // 1 is off; 2/3/4 upscale decoded textures before they are uploaded

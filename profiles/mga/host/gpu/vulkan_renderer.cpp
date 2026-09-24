@@ -589,6 +589,18 @@ struct VulkanRenderer::Impl {
     // Display settings.
     settings::PresentMode requested_present{settings::PresentMode::Fifo};
     bool keep_aspect{true};
+    bool pixel_perfect{};
+    // How much of the window one PSP pixel covers, given the two settings.
+    // Whole numbers only when pixel_perfect is on: at 1080p that is three
+    // rather than 3.97, so the picture comes out smaller and every pixel is
+    // the same size as every other, which is the whole point of asking.
+    [[nodiscard]] double shown_scale(double width, double height) const noexcept {
+        const double fit = std::min(width / kPspWidth, height / kPspHeight);
+        if (!pixel_perfect) return fit;
+        // Never below one: a window too small for a single whole multiple
+        // gets the fractional scale rather than nothing at all.
+        return std::max(1.0, std::floor(fit));
+    }
     bool sharp_screen{};
     bool sharp_textures{};
     // Mipmaps and anisotropic filtering: the PSP sampled one level whatever the
@@ -1226,6 +1238,7 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
     impl.target_extent = {kPspWidth * scale, kPspHeight * scale};
     impl.requested_present = player.present_mode;
     impl.keep_aspect = player.keep_aspect;
+    impl.pixel_perfect = player.pixel_perfect;
     impl.sharp_screen = player.sharp_screen;
     impl.sharp_textures = player.sharp_textures;
     impl.smooth_textures = player.smooth_textures;
@@ -2389,7 +2402,7 @@ void VulkanRenderer::Impl::record_post(VkImageView color, VkImageView depth, std
     // The same rectangle record_game_blit works out, in normalised
     // coordinates, so switching the pass on does not nudge the picture.
     if (keep_aspect && width > 0.0f && height > 0.0f) {
-        const float scale = std::min(width / static_cast<float>(kPspWidth), height / static_cast<float>(kPspHeight));
+        const auto scale = static_cast<float>(shown_scale(width, height));
         const float shown_width = std::min(std::max(1.0f, std::round(kPspWidth * scale)), width);
         const float shown_height = std::min(std::max(1.0f, std::round(kPspHeight * scale)), height);
         push.rect = {std::floor((width - shown_width) * 0.5f) / width,
@@ -2439,7 +2452,7 @@ void VulkanRenderer::Impl::record_game_blit(VkImage source, VkImage destination)
     VkOffset3D low{0, 0, 0};
     VkOffset3D high{width, height, 1};
     if (keep_aspect) {
-        const double scale = std::min(static_cast<double>(width) / kPspWidth, static_cast<double>(height) / kPspHeight);
+        const double scale = shown_scale(width, height);
         const auto shown_width = std::clamp(static_cast<std::int32_t>(std::lround(kPspWidth * scale)), 1, width);
         const auto shown_height = std::clamp(static_cast<std::int32_t>(std::lround(kPspHeight * scale)), 1, height);
         low = {(width - shown_width) / 2, (height - shown_height) / 2, 0};
@@ -3630,6 +3643,10 @@ bool VulkanRenderer::supports_present_mode(settings::PresentMode mode) const {
 
 void VulkanRenderer::set_keep_aspect(bool keep_aspect) {
     if (impl_) impl_->keep_aspect = keep_aspect;
+}
+
+void VulkanRenderer::set_pixel_perfect(bool pixel_perfect) {
+    if (impl_) impl_->pixel_perfect = pixel_perfect;
 }
 
 void VulkanRenderer::set_sharp_screen(bool sharp) {

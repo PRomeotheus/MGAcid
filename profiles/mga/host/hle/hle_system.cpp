@@ -4,6 +4,7 @@
 #include "hle_common.hpp"
 
 #include "kernel/module_loader.hpp"
+#include "kernel/module_sweep.hpp"
 #include "overlays.hpp"
 
 #include "psprecomp/common.hpp"
@@ -138,6 +139,10 @@ void register_process(HleRegistrar &hle) {
             kernel().finish(ctx, arg(ctx, 0));
             return;
         }
+        // MGA_SWEEP_MODULES: the first stage the game starts is the signal
+        // that a stage has something to link against, and from there the
+        // sweep drives the loader itself. It never gives the call back.
+        if (sweep_take_over(kernel().runtime(), ctx, *module)) return;
         module->started = true;
         const std::uint32_t status_address = arg(ctx, 3);
         const std::uint32_t caller_gp = ctx.gpr[28];

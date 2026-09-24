@@ -10,6 +10,7 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <vector>
 #include <utility>
 
 namespace mga {
@@ -97,6 +98,12 @@ void write_media_state(psprecomp::SnapshotWriter &out);
 // matters because the game keeps the disc open the whole time it is running,
 // and refusing a save while any file was open would refuse every save.
 [[nodiscard]] std::string why_no_io_state();
+// The disc, for host code that needs a file the game has not asked for.
+// Empty when there is no disc or no such file.
+[[nodiscard]] std::vector<std::uint8_t> read_disc_file(const std::string &path);
+// Names directly inside a directory on the disc, files and directories both.
+[[nodiscard]] std::vector<std::string> list_disc_directory(const std::string &path);
+
 void write_io_state(psprecomp::SnapshotWriter &out);
 [[nodiscard]] bool read_io_state(psprecomp::SnapshotReader &in);
 

@@ -108,6 +108,13 @@ public:
     void set_present_mode(settings::PresentMode mode);
     [[nodiscard]] bool supports_present_mode(settings::PresentMode mode) const;
     void set_keep_aspect(bool keep_aspect);
+    // Show the frame at a whole multiple of the PSP's 480x272 instead of the
+    // largest fraction of the window that fits. Every PSP pixel then covers
+    // the same square block of screen pixels, where an uneven scale gives
+    // some of them one more row or column than their neighbours. Does
+    // nothing while the frame is stretched to the window rather than
+    // letterboxed.
+    void set_pixel_perfect(bool pixel_perfect);
     void set_sharp_screen(bool sharp);
     void set_sharp_textures(bool sharp);
     void set_smooth_textures(bool smooth);

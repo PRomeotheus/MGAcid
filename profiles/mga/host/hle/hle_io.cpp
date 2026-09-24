@@ -512,6 +512,21 @@ std::string why_no_io_state() {
     return {};
 }
 
+std::vector<std::uint8_t> read_disc_file(const std::string &path) {
+    if (!io().disc) return {};
+    const auto entry = io().disc->find(path);
+    if (!entry || entry->directory) return {};
+    std::vector<std::uint8_t> bytes(entry->size);
+    const std::size_t got = io().disc->read(static_cast<std::uint64_t>(entry->lba) * IsoImage::kSectorSize, bytes);
+    bytes.resize(got);
+    return bytes;
+}
+
+std::vector<std::string> list_disc_directory(const std::string &path) {
+    if (!io().disc) return {};
+    return io().disc->list(path);
+}
+
 void write_io_state(psprecomp::SnapshotWriter &out) {
     IoState &state = io();
     out.u32(static_cast<std::uint32_t>(state.files.size()));

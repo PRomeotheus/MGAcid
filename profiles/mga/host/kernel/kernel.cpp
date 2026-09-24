@@ -197,7 +197,10 @@ void Kernel::start_loader_thread(AllegrexContext &ctx, std::uint32_t entry, std:
 
     const std::uint32_t a0 = ctx.gpr[4];
     const std::uint32_t a1 = ctx.gpr[5];
+    // See start_thread(): the FPU control register survives the reset.
+    const std::uint32_t fcr31 = ctx.fcr31;
     ctx = pristine_context_;
+    ctx.fcr31 = fcr31;
     ctx.set_gpr(4, a0);
     ctx.set_gpr(5, a1);
     ctx.set_gpr(26, thread->control_block);
@@ -248,6 +251,14 @@ std::int32_t Kernel::start_thread(AllegrexContext &ctx, SceUID uid, std::uint32_
     auto &memory = runtime_->memory();
     AllegrexContext &context = thread->context;
     context = pristine_context_;
+    // FCR31 is the FPU's control register, rounding mode included, and a new
+    // thread carries on with the mode in force rather than reverting to the
+    // default. Metal Gear Ac!d sets round-toward-zero once in its C startup,
+    // and the game's own floor idiom -- trunc(x - 0.99999994f) -- is a correct
+    // floor only in that mode. Resetting it left every thread but the first
+    // rounding to nearest, which cancelled the z of a relative move exactly and
+    // walked a character along her own row instead of through a doorway.
+    context.fcr31 = ctx.fcr31;
     context.set_gpr(28, thread->gp);
     std::uint32_t sp = prepare_thread_stack(*thread);
     std::uint32_t argument_copy = 0u;
@@ -987,7 +998,10 @@ bool Kernel::begin_pending_interrupt(AllegrexContext &ctx) {
     pending_interrupts_.pop_front();
     interrupt_active_ = true;
     interrupt_on_return_ = std::move(call.on_return);
+    // See start_thread(): the FPU control register survives the reset.
+    const std::uint32_t fcr31 = ctx.fcr31;
     ctx = pristine_context_;
+    ctx.fcr31 = fcr31;
     for (std::uint32_t i = 0; i < 4u; ++i) ctx.set_gpr(4u + i, call.arguments[i]);
     ctx.set_gpr(29, kInterruptStackTop - kThreadArgumentHome);
     ctx.set_gpr(31, kInterruptReturnStub);

@@ -150,7 +150,14 @@ public:
         std::size_t screen_draws{};
         std::size_t screen_moving{};
         double screen_max{};
+        // Texture coordinate axes held rather than blended, and how many were
+        // looked at. Zero held over a session means the game has no flipbook
+        // and the guard is costing nothing.
+        std::size_t flipbook_held{};
+        std::size_t flipbook_axes{};
     };
+    // Counted by build_blend, read by whoever reports the trace.
+    [[nodiscard]] static MotionReport &blend_report() noexcept;
     static void measure_motion(const FrameRecord &earlier, const FrameRecord &later, const Alignment &alignment,
                                MotionReport &into);
     [[nodiscard]] static const char *mismatch_name(Mismatch reason) noexcept;
@@ -191,6 +198,25 @@ private:
     // it was never in. Genuine motion this fast is a blur to the eye anyway,
     // so there is nothing to lose by leaving it where the game put it.
     static constexpr float kMaxBlendPixels = 80.0f;
+
+    // A texture coordinate that jumps this much of the draw's own texture span
+    // in one game frame is a flipbook, not a scroll, and is held rather than
+    // blended.
+    //
+    // Upstream hit this as fire that ran too fast: a 4x4 atlas stepping a
+    // quarter of the texture per frame, blended, sweeps the in-between images
+    // across the cells between the two. Scrolling in the same scenes moved
+    // 0.003 to 0.06, so a tenth separates them cleanly, and their constant is
+    // kept here.
+    //
+    // Measured against the draw's own span rather than against 1.0, because
+    // this game's coordinates are whatever the GE was handed -- normalised on
+    // one draw and in texels on another -- so a fixed number would mean
+    // different things on different draws. Ac!d animates water and the panels
+    // behind menus by scrolling, which is the case that must keep blending;
+    // whether it has any flipbook at all is unknown, which is what the counter
+    // is for.
+    static constexpr float kFlipbookStep = 0.1f;
 
     // Enough of a frame has to be recognisable for the blend to mean
     // anything. Measured at 99.9% in play and 100% in menus, against 18% on

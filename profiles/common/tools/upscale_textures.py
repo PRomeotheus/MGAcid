@@ -67,10 +67,27 @@ def is_pixel_art(image: Image.Image) -> tuple[bool, str]:
     height, width = rgba.shape[:2]
     rgb = rgba[..., :3].reshape(-1, 3)
 
-    # A small palette. Interface art is usually drawn from a handful of colours;
-    # a photograph of anything has hundreds even at 64x64.
+    # A small palette. Interface art is drawn from a handful of colours; a
+    # photograph of anything has hundreds even at 64x64.
+    #
+    # The threshold is a small fixed number rather than something derived from
+    # the texture's area, and the reason is worth writing down. The area rule
+    # that was here -- max(32, width * height // 64) -- asks for 256 colours on
+    # a 128x128 texture, which no CLUT8 texture can have and no CLUT4 texture
+    # can approach. On a game whose art is entirely palettised it therefore
+    # called everything interface art: every character, weapon and wall in
+    # Metal Gear Ac!d was skipped, which is the opposite of the intent.
+    #
+    # Measured over the Ac!d archives, on 200 textures either side sorted by
+    # name: interface art has a median of 1 distinct colour and 90% of it has
+    # 10 or fewer, while 3D art has a median of exactly 16 -- exactly CLUT4's
+    # palette, because most of it is CLUT4. That last fact is what makes the
+    # cliff: at 16 the rule keeps 31% of the 3D art, at 12 it keeps 76%, and
+    # the interface rejection barely moves (96% against 94%). So the line goes
+    # below 16, not above it.
+    PALETTE_LIMIT = 12
     distinct = len(np.unique(rgb, axis=0))
-    if distinct <= max(32, (width * height) // 64):
+    if distinct <= PALETTE_LIMIT:
         return True, f"{distinct} colours"
 
     # A cut-out alpha channel was a third test here and has been removed: it

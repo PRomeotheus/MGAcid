@@ -1,6 +1,7 @@
 #include "kernel.hpp"
 
 #include "perf/frame_stats.hpp"
+#include "kernel/fast_loading.hpp"
 #include "settings/settings.hpp"
 #include "psprecomp/common.hpp"
 
@@ -526,7 +527,13 @@ void Kernel::advance_clock(std::uint64_t target_us, ClockReason why) {
 // unthrottled setting (MGA_UNTHROTTLED), let it free-run instead.
 bool Kernel::real_time_clock_active() const noexcept {
     static const bool windowed = std::getenv("MGA_NO_RENDER") == nullptr;
-    return windowed && !settings::current().unthrottled && !fast_forward_;
+    // Fast loading rides on the same path the fast-forward key uses rather
+    // than on a clock multiplier of its own. Upstream scales time by up to
+    // sixteen; letting the existing free-run take over is simpler, uses a path
+    // that already works, and reaches whatever the host can manage -- which is
+    // the same answer for anything short of a very fast machine, since the
+    // limit is how quickly the loader threads can be emulated, not the cap.
+    return windowed && !settings::current().unthrottled && !fast_forward_ && !fast_loading::active();
 }
 
 bool Kernel::pace_to_real_time() {

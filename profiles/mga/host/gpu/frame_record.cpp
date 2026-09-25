@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 
 namespace mga::gpu {
 
@@ -240,6 +241,11 @@ void mix_matrix(const std::array<float, 16> &a, const std::array<float, 16> &b, 
 
 } // namespace
 
+FrameRecord::MotionReport &FrameRecord::blend_report() noexcept {
+    static MotionReport report;
+    return report;
+}
+
 bool FrameRecord::build_blend(const FrameRecord &earlier, const FrameRecord &later, float t, FrameRecord &into) {
     if (later.empty()) return false;
     static Alignment alignment;
@@ -265,6 +271,34 @@ bool FrameRecord::build_blend(const FrameRecord &earlier, const FrameRecord &lat
             std::hypot(bx - ax, by - ay) > kMaxBlendPixels)
             continue;
 
+        // A flipbook's step, per axis and per draw: all of a draw's vertices
+        // move together when the game turns the page, so this is one decision
+        // for the draw rather than one per vertex. The span is the older
+        // draw's own coordinate range, which stands in for how much of the
+        // texture the draw covers.
+        // MGA_NO_FLIPBOOK_GUARD blends every step, as before. The threshold
+        // here is reasoned rather than measured -- nobody has yet seen a
+        // flipbook in this game -- so there is a way to turn it off without a
+        // rebuild if it holds something it should have blended.
+        static const bool flipbook_guard = std::getenv("MGA_NO_FLIPBOOK_GUARD") == nullptr;
+        bool hold[2] = {false, false};
+        if (flipbook_guard && !b.vertices.empty() && a.vertices.size() == b.vertices.size()) {
+            for (std::size_t c = 0; c < 2u; ++c) {
+                float low = a.vertices[0].texcoord[c], high = low, step = 0.0f;
+                for (std::size_t v = 0; v < a.vertices.size(); ++v) {
+                    low = std::min(low, a.vertices[v].texcoord[c]);
+                    high = std::max(high, a.vertices[v].texcoord[c]);
+                    step = std::max(step, std::abs(b.vertices[v].texcoord[c] - a.vertices[v].texcoord[c]));
+                }
+                const float span = high - low;
+                ++blend_report().flipbook_axes;
+                if (span > 0.0f && step >= span * kFlipbookStep) {
+                    hold[c] = true;
+                    ++blend_report().flipbook_held;
+                }
+            }
+        }
+
         DrawCall &dst = into.draws_[j];
         for (std::size_t v = 0; v < b.vertices.size(); ++v) {
             const Vertex &va = a.vertices[v];
@@ -278,7 +312,12 @@ bool FrameRecord::build_blend(const FrameRecord &earlier, const FrameRecord &lat
             for (std::size_t c = 0; c < 3u; ++c) vd.normal[c] = mix(va.normal[c], vb.normal[c], t);
             // Scrolling texture coordinates are how this game animates water
             // and the panels behind menus.
-            for (std::size_t c = 0; c < 2u; ++c) vd.texcoord[c] = mix(va.texcoord[c], vb.texcoord[c], t);
+            // Held at the newer frame's value, not the older one's: this
+            // frame is carried forward from the newest real frame rather than
+            // sitting between two, so the newest is the one it should agree
+            // with.
+            for (std::size_t c = 0; c < 2u; ++c)
+                vd.texcoord[c] = hold[c] ? vb.texcoord[c] : mix(va.texcoord[c], vb.texcoord[c], t);
             vd.color = mix_colour(va.color, vb.color, t);
         }
         mix_matrix(a.world, b.world, t, dst.world);

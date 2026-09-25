@@ -5,6 +5,7 @@
 #include "hle_common.hpp"
 #include "install/user_data.hpp"
 #include "state/save_state.hpp"
+#include "kernel/fast_loading.hpp"
 #include "kernel/scene.hpp"
 
 #include "overlays.hpp"
@@ -233,13 +234,27 @@ void report_display_trace() {
               << (active_renderer() != nullptr ? active_renderer()->arena_bytes() / 1024u : 0u)
               << " KB, draws dropped "
               << (active_renderer() != nullptr ? active_renderer()->dropped_draws() : 0u) << ", record overflow "
-              << frame_record().overflow() << " | blobs "
+              << frame_record().overflow() << " | "
+              << (active_renderer() != nullptr ? active_renderer()->video_memory_report() : std::string())
+              << " | blobs "
               << (active_renderer() != nullptr ? active_renderer()->blob_report() : std::string())
 #endif
               << " | cpu scale " << kernel().cpu_scale() << ", charged work "
               << static_cast<double>(kernel().last_work_us()) / 1000.0 << " ms/frame, emulated "
               << static_cast<double>(kernel().now_us() - trace.clock_base.virtual_us) / 1000.0 / seconds
-              << " ms per real s | idle " << kernel().describe_idle_time() << "\n";
+              << " ms per real s | idle " << kernel().describe_idle_time();
+    {
+        // Held texture coordinate axes: a flipbook's page turn, which is
+        // shown rather than blended across. Zero over a session means this
+        // game has no flipbook and the guard is costing nothing.
+        gpu::FrameRecord::MotionReport &blend = gpu::FrameRecord::blend_report();
+        if (blend.flipbook_axes != 0u)
+            std::cout << " | uv axes " << static_cast<double>(blend.flipbook_axes) / seconds << ", held "
+                      << 100.0 * static_cast<double>(blend.flipbook_held) / static_cast<double>(blend.flipbook_axes)
+                      << "%";
+        blend.flipbook_axes = blend.flipbook_held = 0u;
+    }
+    std::cout << "\n";
     trace.set_frame_buf = trace.set_immediate = trace.address_changed = trace.vblank_waits = 0u;
     trace.ctrl_reads = trace.ctrl_blocks = trace.extra_presents = trace.extra_blended = 0u;
     trace.match = {};
@@ -458,7 +473,20 @@ bool should_present(DisplayState &display, std::uint32_t previous_framebuffer) {
     const bool cpu_frame = changed && (display.framebuffer & 0x1F000000u) != kEdramBase &&
                            (display.framebuffer & 0xFF000000u) != 0u;
     const bool idle = display.last_present == Clock::time_point{} || now - display.last_present >= kIdlePresent;
-    if (!display.drawn_since_present && !cpu_frame && !idle) return false;
+    // An interface of ours on screen is its own reason to present.
+    //
+    // While one of our dialogs is up the guest often draws nothing at all --
+    // on a PSP the utility drew itself, so the game only polls and flips --
+    // and with no display list there is nothing to set drawn_since_present.
+    // The only presents left are then the idle ones, ten a second, and a
+    // dialog sampling input and animating at ten frames a second does not read
+    // as a slow menu so much as a broken one.
+    //
+    // This is self-limiting: the flag is set by draw_over_game(), which runs
+    // from the present it causes, and clears itself the first time that finds
+    // nothing to draw.
+    const bool interface_up = ui::overlay_drawn();
+    if (!display.drawn_since_present && !cpu_frame && !idle && !interface_up) return false;
     display.presented = display.framebuffer;
     display.drawn_since_present = false;
     display.last_present = now;
@@ -816,6 +844,9 @@ void register_display_ctrl(HleRegistrar &hle) {
             memory.store8(entry + 11u, right_y);
             for (std::uint32_t j = 12u; j < 16u; ++j) memory.store8(entry + j, 0u);
         }
+        // A held button or direction means someone is playing, not waiting.
+        // The sticks do not count: a stick resting off centre is not input.
+        fast_loading::note_buttons((buttons & 0x0000F0FFu) != 0u);
         ++display_trace().ctrl_reads;
         // One sample per vblank, so the vblank counter is the sample counter.
         // Not carried in a save state: it is a cursor into a stream of samples
@@ -910,6 +941,7 @@ void audio_output(Runtime &rt, AllegrexContext &ctx) {
         static std::vector<std::int16_t> staging;
         staging.resize(frames * 2u);
         if (const std::uint8_t *source = rt.memory().raw_pointer(buffer, words * 2u)) {
+            int peak = 0;
             for (std::uint32_t frame = 0; frame < frames; ++frame) {
                 const std::size_t index = mono ? frame : frame * 2u;
                 const auto sample = static_cast<std::int16_t>(source[index * 2u] | (source[index * 2u + 1u] << 8));
@@ -917,6 +949,23 @@ void audio_output(Runtime &rt, AllegrexContext &ctx) {
                 staging[frame * 2u + 1u] = mono ? sample
                                                 : static_cast<std::int16_t>(source[(index + 1u) * 2u] |
                                                                             (source[(index + 1u) * 2u + 1u] << 8));
+                peak = std::max({peak, std::abs(static_cast<int>(staging[frame * 2u])),
+                                 std::abs(static_cast<int>(staging[frame * 2u + 1u]))});
+            }
+            // The other half of telling a load from play, and the half that
+            // makes it safe: a buffer counts as silence only once the
+            // channel's volume is applied, so a full-scale buffer at zero
+            // volume is silence and the first audible sample of anything ends
+            // the fast stretch at once. Without this the detector would see a
+            // disc read during play with music going and let time run free.
+            const std::uint32_t volume = std::max(left, right);
+            const int audible = static_cast<int>(static_cast<std::int64_t>(peak) * volume / 0x8000);
+            if (fast_loading::note_audio(audible)) {
+                // Silence handed over while time runs ahead: dropped rather
+                // than piled into the ring faster than the device plays it.
+                // The channel's cursor catches up when sound comes back.
+                kernel().finish(ctx, static_cast<std::uint32_t>(frames));
+                return;
             }
             audio::AudioSink::instance().mix(state.cursor, staging.data(), frames, left, right);
         } else {
@@ -1144,8 +1193,22 @@ void present_between_frames() {
     // while the interface is up there is no way to put it on this frame, and
     // the frame is not worth showing without it: a menu that appears on every
     // second image is worse than a menu at thirty.
-    const bool blended = smoothing() == Smoothing::Lerp && extra().built && extra().memory != nullptr &&
-                         !ui::overlay_drawn();
+    // While the interface is up, this frame is not presented at all.
+    //
+    // The intent below was already that a menu at thirty beats a menu on every
+    // second image -- but not presenting the blend and not presenting were run
+    // together, and the fallback presents anyway. Every present consumes the
+    // interface's draw data and clears it, so the game's own flip draws the
+    // menu and this one, arriving a vblank later with nothing left to draw,
+    // shows the same picture without it. That is the menu on every second
+    // image, which is exactly what the comment set out to avoid: a menu
+    // blinking at thirty, not a menu held at thirty.
+    //
+    // Skipping the present costs the steady rate this was trying to hold, and
+    // that is the right trade while a menu is open: the game is paused behind
+    // it and there is no motion for the extra image to smooth.
+    if (ui::overlay_drawn()) return;
+    const bool blended = smoothing() == Smoothing::Lerp && extra().built && extra().memory != nullptr;
     if (blended) {
         extra_frame().replay(renderer, *extra().memory);
         renderer.present(extra().address);
@@ -1181,6 +1244,7 @@ gpu::VulkanRenderer *ensure_renderer() {
     media().renderer = std::move(renderer);
     ui::attach(*media().renderer);
     kernel().add_vblank_hook(present_between_frames);
+    kernel().add_vblank_hook(fast_loading::update);
     return media().renderer.get();
 }
 #endif

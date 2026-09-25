@@ -33,6 +33,21 @@ struct Settings {
     // Show the frame at a whole multiple of 480x272 rather than at whatever
     // fraction fills the window. Needs keep_aspect.
     bool pixel_perfect{};
+    // Evaluate the game's lights per fragment rather than per vertex.
+    bool light_per_pixel{true};
+    // Shade lit geometry in linear space and tonemap it, instead of
+    // multiplying encoded values together and clamping at one.
+    bool linear_light{};
+    float tonemap_curve{0.47f};        // 0 linear and clipped .. 4 heavily filmic; 0.47 holds mid grey
+    float volumetric{};                // 0 off .. 1 strongest; light in the air; needs shadow maps
+    float surface_relief{};            // 0 off .. 8; texture shading read as relief; needs per-pixel lighting
+    float field_of_view{1.0f};         // 0.8 .. 1.6; multiplies the field of view the game asks for
+    bool fast_loading{};               // let emulated time run ahead while the game loads and is silent
+    bool accurate_specular{};          // a real view direction for highlights, and a Fresnel rim with it
+    float fresnel{1.0f};               // 0 .. 4; how strong that rim is
+    float ambient_shape{};             // 0 flat .. 1; how much ambient favours the lit side
+    float light_intensity{1.0f};       // 0.25 .. 8; scales light before the tonemap; needs linear lighting
+    float dither{1.0f};                // 0 .. 4 eighth-bits of noise against banding; needs linear lighting
     bool sharp_textures{};             // nearest instead of linear texture sampling
     bool smooth_textures{};            // mipmaps and anisotropic filtering, which the PSP had no room for
     std::uint32_t texture_scale{1u};   // 1 is off; 2/3/4 upscale decoded textures before they are uploaded
@@ -44,7 +59,15 @@ struct Settings {
     float contact_shadows{};           // 0 off .. 1 strongest; darkens creases from depth, drawn with the scene
     float blob_shadows{};              // 0 off .. 1 strongest; a soft blob under each character
     float shadow_maps{};               // 0 off .. 1 strongest; shadows cast from the game's own lights
-    float colour_grade{};              // 0 off .. 1 strongest; contrast and saturation lift; needs post_process
+    float colour_grade{};              // 0 off .. 1 strongest; how far towards the grade; needs post_process
+    // A .cube colour grading table in <data>/grades, by file name. Empty means
+    // the built-in contrast and saturation lift. colour_grade is the strength
+    // either way, so a table with colour_grade at 0 does nothing.
+    std::string colour_lut;
+    float bloom{};                     // 0 off .. 1 strongest; glow around bright things; needs post_process
+    float sharpen{};                   // 0 off .. 1 strongest; contrast-adaptive sharpen; needs post_process
+    float depth_of_field{};            // 0 off .. 1 strongest; the background softens with distance
+    float reflections{};               // 0 off .. 1 strongest; screen-space reflections, floors only
     // Show an extra image between the game's own frames, built by carrying the
     // last frame's motion forward. The game itself is untouched and still runs
     // at thirty: it takes one simulation step per frame and cannot be made to

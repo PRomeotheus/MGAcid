@@ -3,6 +3,7 @@
 #include "ge_state.hpp"
 
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <string>
@@ -115,6 +116,36 @@ public:
     // nothing while the frame is stretched to the window rather than
     // letterboxed.
     void set_pixel_perfect(bool pixel_perfect);
+    // Work the game's lights out per fragment rather than per vertex. The
+    // lights, materials and falloff are the GE's own; only the place they are
+    // evaluated changes. The hardware had no choice, and it shows on models of
+    // a few hundred triangles: shading goes flat across each triangle, and a
+    // specular highlight -- a power of a dot product -- jumps from one vertex to
+    // the next instead of travelling over a surface.
+    void set_light_per_pixel(bool per_pixel);
+    // Shade lit geometry in linear space and tonemap it. curve is how much of
+    // the film curve to apply: zero is linear shading with a plain clip, and
+    // 0.47 leaves a mid grey where the old path had it.
+    void set_linear_light(bool enabled);
+    // Light scattered out of the air between the eye and the scene, marched
+    // through the shadow map. Needs a casting light, so it follows the shadow
+    // setting being on.
+    void set_volumetric(float strength);
+    // Read a texture's own light and dark as relief, and light it accordingly.
+    // Works only alongside per-pixel lighting, which is where it is applied.
+    void set_surface_relief(float strength);
+    // Multiplies the field of view the game asks for. 1 is the game's own.
+    void set_field_of_view(float factor);
+    // A real viewing direction for the specular half vector, and a Schlick
+    // Fresnel term that needs one.
+    void set_accurate_specular(bool enabled, float fresnel);
+    // How much of the ambient favours the side facing the dominant light.
+    void set_ambient_shape(float strength);
+    // Scales the light before the tonemap, so there is something above one for
+    // the curve to work on, and dithers the result against banding.
+    void set_light_intensity(float intensity, float dither);
+    [[nodiscard]] bool volumetric_available() const noexcept;
+    void set_tonemap(float curve);
     void set_sharp_screen(bool sharp);
     void set_sharp_textures(bool sharp);
     void set_smooth_textures(bool smooth);
@@ -133,6 +164,39 @@ public:
     // Lifts contrast and saturation in the post pass, to put the art back in
     // the range it was authored for. 0 turns it off. Needs post-processing.
     void set_colour_grade(float strength);
+    // Replaces the built-in contrast-and-saturation grade with a lookup table
+    // read from an Adobe .cube, which is what every colour grading tool
+    // exports. False with `error` set when the file is missing or not one, and
+    // the grade already in use is kept. set_colour_grade still sets how far
+    // the picture is taken towards it, so a table does nothing at strength 0.
+    bool set_colour_lut(const std::filesystem::path &path, std::string &error);
+    // Back to the built-in grade.
+    void clear_colour_lut();
+    // The table in use, or empty when it is the built-in grade.
+    [[nodiscard]] std::filesystem::path colour_lut_path() const;
+    // A glow around bright things: a lens scatters light from a bright source
+    // across what is near it and a sensor blooms outright, and neither happens
+    // on a PSP. Only light above a threshold spills, so ordinary surfaces do
+    // not glow. 0 turns it off. Needs post-processing.
+    void set_bloom(float strength);
+    // Contrast-adaptive sharpening over the finished frame. The game's own
+    // picture is 480x272 and is being magnified several times over, and a
+    // magnified picture is a soft one however good the filter; this puts the
+    // edges back without the white outlines a plain unsharp mask leaves.
+    // 0 turns it off. Needs post-processing.
+    void set_sharpen(float strength);
+    // The background goes soft with distance, focused on whatever is under the
+    // middle of the screen. Drawn at the seam between the world and the
+    // interface, so the heads-up display stays sharp. Everything nearer than
+    // the focal plane stays sharp too -- a real lens blurs the near field as
+    // well, and here that would be the player's own shoulder. 0 turns it off.
+    void set_depth_of_field(float strength);
+    // Reflections on the floor, traced through the picture itself. Only on
+    // surfaces that face up: there is nothing in a PSP display list that says
+    // which materials are polished, so this asks the geometry instead, and a
+    // floor is the case it can do well. It can only reflect what is already on
+    // screen, which in a corridor seen from above is not much. 0 turns it off.
+    void set_reflections(float strength);
 
     // Vertices and uniform blocks come out of one per-frame arena, and a draw
     // that does not fit is dropped. These report how close a frame came to the
@@ -141,6 +205,10 @@ public:
     [[nodiscard]] std::uint64_t arena_peak_bytes() const noexcept;
     [[nodiscard]] std::uint64_t arena_bytes() const noexcept;
     [[nodiscard]] std::uint64_t dropped_draws() const noexcept;
+    // What the two caches that hold video memory are holding, against what
+    // they are allowed. A budget nothing reports is a budget nobody can tell
+    // is working.
+    [[nodiscard]] std::string video_memory_report() const;
     // What the blob seam decided, counted since the game started.
     [[nodiscard]] std::string blob_report() const;
     // Blob shadows under the characters. 0 turns them off. Unlike the effects

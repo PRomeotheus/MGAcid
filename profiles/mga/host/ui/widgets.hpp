@@ -11,21 +11,49 @@
 namespace mga::ui {
 
 // Colours from the project's logo: dark brown, bronze and gold.
+// Metal Gear's palette, not Monster Hunter's.
+//
+// The amber and brown these replace came from the profile this port was forked
+// from, where they suited the game. Metal Gear's interfaces are a dark
+// desaturated green with near-white text on them -- the colour of a display
+// rather than of parchment.
+//
+// Sampled from a frame of Metal Gear Solid 4's shop screen rather than chosen
+// by eye, which is why the numbers are not round: the panel reads (30, 41, 29)
+// there, its text (251, 254, 248) -- white with just enough green left in it to
+// belong to the panel -- and the labels between them (159, 174, 146). Green is
+// the highest channel everywhere, including in the greys, and that is what
+// stops the result looking merely dark rather than looking like a screen.
 namespace colors {
-inline constexpr ImU32 kBackdrop = IM_COL32(12, 8, 5, 170);
-inline constexpr ImU32 kPanel = IM_COL32(30, 21, 15, 246);
-inline constexpr ImU32 kPanelEdge = IM_COL32(143, 93, 36, 255);
-inline constexpr ImU32 kRow = IM_COL32(255, 240, 210, 10);
-inline constexpr ImU32 kRowHover = IM_COL32(233, 199, 122, 28);
-inline constexpr ImU32 kRowFocus = IM_COL32(217, 166, 75, 64);
-inline constexpr ImU32 kAccent = IM_COL32(217, 166, 75, 255);
-inline constexpr ImU32 kAccentBright = IM_COL32(251, 230, 166, 255);
-inline constexpr ImU32 kText = IM_COL32(246, 220, 174, 255);
-inline constexpr ImU32 kTextDim = IM_COL32(179, 154, 124, 255);
-inline constexpr ImU32 kTextDisabled = IM_COL32(120, 103, 86, 255);
-inline constexpr ImU32 kDanger = IM_COL32(214, 102, 76, 255);
-inline constexpr ImU32 kGood = IM_COL32(150, 196, 120, 255);
-inline constexpr ImU32 kTrack = IM_COL32(255, 240, 210, 36);
+inline constexpr ImU32 kBackdrop = IM_COL32(9, 13, 9, 185);
+inline constexpr ImU32 kPanel = IM_COL32(22, 31, 21, 246);
+inline constexpr ImU32 kPanelEdge = IM_COL32(154, 170, 146, 255);
+inline constexpr ImU32 kRow = IM_COL32(232, 245, 225, 10);
+inline constexpr ImU32 kRowHover = IM_COL32(206, 228, 196, 30);
+inline constexpr ImU32 kRowFocus = IM_COL32(226, 244, 216, 66);
+inline constexpr ImU32 kAccent = IM_COL32(176, 202, 160, 255);
+inline constexpr ImU32 kAccentBright = IM_COL32(246, 253, 235, 255);
+inline constexpr ImU32 kText = IM_COL32(233, 243, 228, 255);
+inline constexpr ImU32 kTextDim = IM_COL32(150, 168, 142, 255);
+inline constexpr ImU32 kTextDisabled = IM_COL32(97, 111, 93, 255);
+// Kept warm on purpose: a warning has to stop reading as part of the panel,
+// and in a green interface the one thing that does that is not being green.
+inline constexpr ImU32 kDanger = IM_COL32(211, 118, 88, 255);
+inline constexpr ImU32 kGood = IM_COL32(150, 206, 132, 255);
+inline constexpr ImU32 kTrack = IM_COL32(232, 245, 225, 36);
+// The selected row, inverted: a near-white bar with dark ink on it, which is
+// what Metal Gear Solid 4 does and the last thing that separated this from the
+// screenshot. Sampled from the same frame -- the bar reads (251, 254, 249) and
+// its text (33, 40, 32) -- and everything a row draws needs a dark counterpart,
+// because a row is a label, a value, arrows, a switch and a slider, and any one
+// of them left pale would vanish into the bar.
+inline constexpr ImU32 kRowSelected = IM_COL32(243, 249, 238, 255);
+inline constexpr ImU32 kOnSelected = IM_COL32(28, 36, 27, 255);
+inline constexpr ImU32 kOnSelectedDim = IM_COL32(74, 88, 70, 255);
+inline constexpr ImU32 kOnSelectedFaint = IM_COL32(148, 160, 142, 255);
+inline constexpr ImU32 kOnSelectedTrack = IM_COL32(28, 36, 27, 56);
+inline constexpr ImU32 kDangerOnSelected = IM_COL32(138, 54, 34, 255);
+inline constexpr ImU32 kGoodOnSelected = IM_COL32(44, 96, 40, 255);
 } // namespace colors
 
 ImGuiStyle make_style(float scale, float font_size);

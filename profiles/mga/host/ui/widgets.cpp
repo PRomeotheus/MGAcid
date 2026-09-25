@@ -64,7 +64,27 @@ struct Row {
     bool pressed{};
     bool focused{};
     bool hovered{};
+    // What everything else in this row should be drawn with. A selected row is
+    // a pale bar, so its contents have to be dark; every other row keeps the
+    // usual palette. Carried here rather than recomputed by each caller so
+    // that a row cannot end up half inverted.
+    ImU32 text{colors::kText};
+    ImU32 dim{colors::kTextDim};
+    ImU32 accent{colors::kAccent};
+    ImU32 bright{colors::kAccentBright};
+    ImU32 track{colors::kTrack};
+    ImU32 faded{colors::kTextDisabled};
+    ImU32 cutout{colors::kPanel};
 };
+
+// The dark counterpart of a colour, for drawing it on the selected bar.
+ImU32 on_selected(ImU32 normal) {
+    if (normal == colors::kDanger) return colors::kDangerOnSelected;
+    if (normal == colors::kGood) return colors::kGoodOnSelected;
+    if (normal == colors::kTextDim) return colors::kOnSelectedDim;
+    if (normal == colors::kTextDisabled) return colors::kOnSelectedFaint;
+    return colors::kOnSelected;
+}
 
 // The part every row shares: a full-width focusable strip with its label.
 Row row(const char *label, const RowOptions &options, ImU32 color = colors::kText, float height_lines = 1.0f) {
@@ -81,14 +101,20 @@ Row row(const char *label, const RowOptions &options, ImU32 color = colors::kTex
     ImDrawList *draw = ImGui::GetWindowDrawList();
     const float rounding = px(6.0f);
     if (result.focused) {
-        draw->AddRectFilled(result.min, result.max, colors::kRowFocus, rounding);
-        draw->AddRectFilled(result.min, {result.min.x + px(4.0f), result.max.y}, colors::kAccent, rounding,
-                            ImDrawFlags_RoundCornersLeft);
+        draw->AddRectFilled(result.min, result.max, colors::kRowSelected, rounding);
+        result.text = colors::kOnSelected;
+        result.dim = colors::kOnSelectedDim;
+        result.accent = colors::kOnSelected;
+        result.bright = colors::kOnSelected;
+        result.track = colors::kOnSelectedTrack;
+        result.faded = colors::kOnSelectedFaint;
+        result.cutout = colors::kRowSelected;
     } else if (result.hovered) {
         draw->AddRectFilled(result.min, result.max, colors::kRowHover, rounding);
     }
     const float text_y = result.min.y + (height - font()) * 0.5f;
-    draw->AddText({result.min.x + px(16.0f), text_y}, options.disabled ? colors::kTextDisabled : color, label,
+    const ImU32 ink = options.disabled ? colors::kTextDisabled : color;
+    draw->AddText({result.min.x + px(16.0f), text_y}, result.focused ? on_selected(ink) : ink, label,
                   shown_end(label));
     if (result.focused || (result.hovered && Layer::get().description().empty())) {
         std::string description = options.description;
@@ -105,11 +131,14 @@ float draw_value(const Row &r, const std::string &value, const RowOptions &optio
     const float text_y = r.min.y + (r.max.y - r.min.y - font()) * 0.5f;
     const float value_width = ImGui::CalcTextSize(value.c_str()).x;
     const float x = r.max.x - right_inset - value_width;
-    draw->AddText({x, text_y}, options.disabled ? colors::kTextDisabled : color, value.c_str());
+    // r.faded and r.dim rather than the palette's own: on the selected bar a
+    // disabled value and its note have to be dark like everything else, and a
+    // row half inverted is worse than one not inverted at all.
+    draw->AddText({x, text_y}, options.disabled ? r.faded : color, value.c_str());
     if (!options.note.empty() && options.disabled) {
         ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * 0.78f);
         const float note_width = ImGui::CalcTextSize(options.note.c_str()).x;
-        draw->AddText({x - px(18.0f) - note_width, text_y + font() * 0.15f}, colors::kTextDim, options.note.c_str());
+        draw->AddText({x - px(18.0f) - note_width, text_y + font() * 0.15f}, r.dim, options.note.c_str());
         ImGui::PopFont();
     }
     return x;
@@ -228,18 +257,18 @@ ImGuiStyle make_style(float scale, float font_size) {
     c[ImGuiCol_TextDisabled] = rgba(colors::kTextDisabled);
     c[ImGuiCol_WindowBg] = rgba(colors::kPanel);
     c[ImGuiCol_ChildBg] = ImVec4(0, 0, 0, 0);
-    c[ImGuiCol_PopupBg] = rgba(IM_COL32(38, 27, 19, 252));
-    c[ImGuiCol_ModalWindowDimBg] = rgba(IM_COL32(8, 5, 3, 150));
+    c[ImGuiCol_PopupBg] = rgba(IM_COL32(27, 37, 26, 252));
+    c[ImGuiCol_ModalWindowDimBg] = rgba(IM_COL32(7, 10, 7, 150));
     c[ImGuiCol_Border] = rgba(colors::kPanelEdge);
-    c[ImGuiCol_FrameBg] = rgba(IM_COL32(255, 240, 210, 20));
+    c[ImGuiCol_FrameBg] = rgba(IM_COL32(232, 245, 225, 20));
     c[ImGuiCol_FrameBgHovered] = rgba(colors::kRowHover);
     c[ImGuiCol_FrameBgActive] = rgba(colors::kRowFocus);
-    c[ImGuiCol_TextSelectedBg] = rgba(IM_COL32(217, 166, 75, 110));
+    c[ImGuiCol_TextSelectedBg] = rgba(IM_COL32(176, 202, 160, 110));
     c[ImGuiCol_ScrollbarBg] = ImVec4(0, 0, 0, 0);
-    c[ImGuiCol_ScrollbarGrab] = rgba(IM_COL32(143, 93, 36, 160));
-    c[ImGuiCol_ScrollbarGrabHovered] = rgba(IM_COL32(176, 122, 54, 200));
+    c[ImGuiCol_ScrollbarGrab] = rgba(IM_COL32(104, 126, 96, 160));
+    c[ImGuiCol_ScrollbarGrabHovered] = rgba(IM_COL32(140, 166, 128, 200));
     c[ImGuiCol_ScrollbarGrabActive] = rgba(colors::kAccent);
-    c[ImGuiCol_Separator] = rgba(IM_COL32(143, 93, 36, 120));
+    c[ImGuiCol_Separator] = rgba(IM_COL32(104, 126, 96, 120));
     // Rows draw their own focus; ImGui's rectangle would double it.
     c[ImGuiCol_NavCursor] = ImVec4(0, 0, 0, 0);
     return style;
@@ -274,7 +303,7 @@ void begin_panel(const char *id, const std::string &title, const std::string &su
     const ImVec2 line = ImGui::GetCursorScreenPos();
     const float line_width = ImGui::GetContentRegionAvail().x;
     draw->AddRectFilledMultiColor(line, {line.x + line_width, line.y + px(2.0f)}, colors::kAccent,
-                                  IM_COL32(143, 93, 36, 0), IM_COL32(143, 93, 36, 0), colors::kAccent);
+                                  IM_COL32(176, 202, 160, 0), IM_COL32(176, 202, 160, 0), colors::kAccent);
     ImGui::Dummy({0.0f, px(10.0f)});
 }
 
@@ -289,7 +318,7 @@ void begin_footer() {
     ImDrawList *draw = ImGui::GetWindowDrawList();
     const ImVec2 line = ImGui::GetCursorScreenPos();
     const float width = ImGui::GetContentRegionAvail().x;
-    draw->AddLine({line.x, line.y + px(4.0f)}, {line.x + width, line.y + px(4.0f)}, IM_COL32(143, 93, 36, 90),
+    draw->AddLine({line.x, line.y + px(4.0f)}, {line.x + width, line.y + px(4.0f)}, IM_COL32(104, 126, 96, 90),
                   px(1.0f));
     ImGui::Dummy({0.0f, px(10.0f)});
     // Two lines for the description, whatever it holds, so the hints stay put.
@@ -372,10 +401,10 @@ int choice_row(const char *label, const std::string &value, const RowOptions &op
     }
     const bool live = r.focused || r.hovered;
     ImDrawList *draw = ImGui::GetWindowDrawList();
-    draw_value(r, value, options, px(16.0f) + font() * 1.1f, live ? colors::kAccentBright : colors::kText);
+    draw_value(r, value, options, px(16.0f) + font() * 1.1f, live ? r.bright : r.text);
     // A locked row shows its value without the arrows that would change it.
     if (options.disabled) return 0;
-    const ImU32 arrow = live ? colors::kAccent : colors::kTextDim;
+    const ImU32 arrow = live ? r.accent : r.dim;
     draw_triangle(draw, {right_arrow_x, mid_y}, font() * 0.55f, true, arrow);
     draw_triangle(draw, {left_arrow_x, mid_y}, font() * 0.55f, false, arrow);
     return delta;
@@ -393,13 +422,13 @@ bool toggle_row(const char *label, bool value, const RowOptions &options) {
     const ImVec2 max{r.max.x - px(16.0f), mid_y + height * 0.5f};
     const ImVec2 min{max.x - width, mid_y - height * 0.5f};
     const bool on = toggled ? !value : value;
-    const ImU32 track = options.disabled ? colors::kTrack : on ? colors::kAccent : colors::kTrack;
+    const ImU32 track = options.disabled ? r.track : on ? r.accent : r.track;
     draw->AddRectFilled(min, max, track, height * 0.5f);
     const float knob = height * 0.5f - px(3.0f);
     const ImVec2 knob_center{on ? max.x - height * 0.5f : min.x + height * 0.5f, mid_y};
-    draw->AddCircleFilled(knob_center, knob, options.disabled ? colors::kTextDisabled : colors::kText);
+    draw->AddCircleFilled(knob_center, knob, options.disabled ? r.faded : r.text);
     draw_value(r, on ? "On" : "Off", options, px(16.0f) + width + px(12.0f),
-               on ? colors::kAccentBright : colors::kTextDim);
+               on ? r.bright : r.dim);
     return toggled;
 }
 
@@ -434,15 +463,15 @@ bool slider_row(const char *label, int &value, int minimum, int maximum, int ste
 
     const float t = static_cast<float>(value - minimum) / static_cast<float>(std::max(1, maximum - minimum));
     const bool live = (r.focused || r.hovered) && !options.disabled;
-    draw->AddRectFilled(bar_min, bar_max, colors::kTrack, px(3.0f));
+    draw->AddRectFilled(bar_min, bar_max, r.track, px(3.0f));
     draw->AddRectFilled(bar_min, {bar_min.x + bar_width * t, bar_max.y},
-                        options.disabled ? colors::kTextDisabled : colors::kAccent, px(3.0f));
+                        options.disabled ? r.faded : r.accent, px(3.0f));
     draw->AddCircleFilled({bar_min.x + bar_width * t, mid_y}, font() * (live ? 0.42f : 0.34f),
-                          options.disabled ? colors::kTextDisabled : live ? colors::kAccentBright : colors::kText);
+                          options.disabled ? r.faded : live ? r.bright : r.text);
     char text[32];
     std::snprintf(text, sizeof(text), format, value);
     draw_value(r, text, options, px(16.0f) + bar_width + font() * 1.0f,
-               live ? colors::kAccentBright : colors::kText);
+               live ? r.bright : r.text);
     return value != before;
 }
 
@@ -450,8 +479,8 @@ bool button_row(const char *label, const RowOptions &options, ImU32 color) {
     const Row r = row(label, options, color);
     ImDrawList *draw = ImGui::GetWindowDrawList();
     const float mid_y = (r.min.y + r.max.y) * 0.5f;
-    const ImU32 chevron = options.disabled ? colors::kTextDisabled : (r.focused || r.hovered) ? colors::kAccent
-                                                                                            : colors::kTextDim;
+    const ImU32 chevron = options.disabled ? r.faded : (r.focused || r.hovered) ? r.accent
+                                                                                            : r.dim;
     const float x = r.max.x - px(16.0f) - font() * 0.3f;
     const float s = font() * 0.28f;
     draw->AddLine({x - s, mid_y - s * 1.6f}, {x + s * 0.6f, mid_y}, chevron, px(2.0f));
@@ -465,12 +494,12 @@ bool value_row(const char *label, const std::string &value, const RowOptions &op
     ImDrawList *draw = ImGui::GetWindowDrawList();
     const float mid_y = (r.min.y + r.max.y) * 0.5f;
     const bool live = (r.focused || r.hovered) && !options.disabled;
-    const ImU32 chevron = options.disabled ? colors::kTextDisabled : live ? colors::kAccent : colors::kTextDim;
+    const ImU32 chevron = options.disabled ? r.faded : live ? r.accent : r.dim;
     const float x = r.max.x - px(16.0f) - font() * 0.3f;
     const float s = font() * 0.28f;
     draw->AddLine({x - s, mid_y - s * 1.6f}, {x + s * 0.6f, mid_y}, chevron, px(2.0f));
     draw->AddLine({x + s * 0.6f, mid_y}, {x - s, mid_y + s * 1.6f}, chevron, px(2.0f));
-    draw_value(r, value, options, px(16.0f) + font() * 1.1f, live ? colors::kAccentBright : colors::kText);
+    draw_value(r, value, options, px(16.0f) + font() * 1.1f, live ? r.bright : r.text);
     return r.pressed && !options.disabled;
 }
 
@@ -480,7 +509,7 @@ bool list_row(const char *id, const std::string &name, const std::string &detail
     const float mid_y = (r.min.y + r.max.y) * 0.5f;
     const float icon_x = r.min.x + px(18.0f);
     const float unit = font() * 0.5f;
-    const ImU32 ink = highlight ? colors::kAccent : colors::kTextDim;
+    const ImU32 ink = highlight ? r.accent : r.dim;
     switch (icon) {
     case ListIcon::Folder:
     case ListIcon::ParentFolder: {
@@ -490,7 +519,7 @@ bool list_row(const char *id, const std::string &name, const std::string &detail
         draw->AddRectFilled(min, max, ink, px(2.0f));
         if (icon == ListIcon::ParentFolder)
             draw->AddTriangleFilled({min.x + unit, min.y + unit * 0.25f}, {min.x + unit * 0.55f, min.y + unit * 0.9f},
-                                    {min.x + unit * 1.45f, min.y + unit * 0.9f}, colors::kPanel);
+                                    {min.x + unit * 1.45f, min.y + unit * 0.9f}, r.cutout);
         break;
     }
     case ListIcon::Disc:
@@ -513,9 +542,9 @@ bool list_row(const char *id, const std::string &name, const std::string &detail
     const float detail_width = ImGui::CalcTextSize(detail.c_str()).x;
     const float detail_x = r.max.x - px(16.0f) - detail_width;
     ImGui::PushClipRect({text_x, r.min.y}, {detail_x - px(12.0f), r.max.y}, true);
-    draw->AddText({text_x, text_y}, highlight ? colors::kAccentBright : colors::kText, name.c_str());
+    draw->AddText({text_x, text_y}, highlight ? r.bright : r.text, name.c_str());
     ImGui::PopClipRect();
-    draw->AddText({detail_x, text_y}, colors::kTextDim, detail.c_str());
+    draw->AddText({detail_x, text_y}, r.dim, detail.c_str());
     return r.pressed;
 }
 

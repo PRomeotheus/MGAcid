@@ -44,6 +44,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -152,7 +153,7 @@ bool Menu::frame() {
     const bool font_list_was_open = (tab_ == 0 && font_list_open()) || (tab_ == 4 && save_screen_open());
     back_ = back || pad_back;
 
-    begin_panel("##menu", "Yakumo", paused_ ? "Paused" : "Running", true);
+    begin_panel("##menu", "PSPRecomp", paused_ ? "Paused" : "Running", true);
     static const char *const kTabs[] = {"Video", "Audio", "Controls", "Network", "System"};
     const bool switched = tab_bar(kTabs, 5, tab_) || first_frame_;
     first_frame_ = false;
@@ -262,6 +263,37 @@ void Menu::video() {
         renderer().set_sharp_screen(s.sharp_screen);
         settings::save();
     }
+    {
+        int field = static_cast<int>(std::lround(s.field_of_view * 100.0f));
+        RowOptions o = options_for(
+            "video.field_of_view",
+            "How much of the world fits on screen, as a percentage of what the game asks for. The field is widened "
+            "properly rather than by stretching the picture, so nothing changes shape: the aspect ratio the game "
+            "chose is kept and only how much fits changes. Ac!d places its camera itself, shot by shot, so this is "
+            "the one way to see more of a room without moving it. Past about 120% expect to find the edges of what "
+            "the game bothered to draw -- it culls to its own field, not to this one.");
+        if (slider_row("Field of view", field, 80, 160, 5, "%d%%", o)) {
+            s.field_of_view = static_cast<float>(field) / 100.0f;
+            renderer().set_field_of_view(s.field_of_view);
+            settings::save();
+        }
+    }
+    {
+        RowOptions o = options_for(
+            "video.fast_loading",
+            "Lets the clock run ahead while the game loads. Reading the disc is instant here, but a load still takes "
+            "as long as it did on the hardware: the loader reads a piece, unpacks it, and waits on the clock, which "
+            "the port holds to the PSP's pace. This lets that hold go, and only then. A load is recognised from what "
+            "the game does rather than from a timer -- it is reading the disc and it is silent -- so the first "
+            "audible sample, a held button, the menu or Game speed Unlimited all put it back to real time at once. "
+            "Off by default because whether this game's loader waits on the clock the way the one it was written "
+            "against did has not been checked.");
+        if (toggle_row("Fast loading", s.fast_loading, o)) {
+            s.fast_loading = !s.fast_loading;
+            settings::save();
+        }
+    }
+    section("Textures");
     if (choice_row("Texture filter", s.sharp_textures ? "Sharp" : "Smooth",
                    options_for("video.sharp_textures", "How the game's textures are sampled: smooth (bilinear) or "
                                                        "sharp (nearest texel)."))) {
@@ -324,19 +356,148 @@ void Menu::video() {
         }
     }
     {
-        RowOptions o = options_for(
-            "video.frame_smoothing",
-            "Shows an extra image between the game's own frames, worked out by carrying the motion in the last two "
-            "forward. Metal Gear Ac!d draws thirty frames a second and takes exactly one step of its simulation per "
-            "frame, so it cannot be asked for more without the whole game running at double speed -- the frames in "
-            "between have to be invented instead. Motion is predicted rather than known, so something that stops or "
-            "reverses sharply can overshoot for half a frame. The interface and anything else laid out to the pixel "
-            "is left exactly where the game put it.");
-        if (toggle_row("Frame smoothing", s.frame_smoothing, o)) {
-            s.frame_smoothing = !s.frame_smoothing;
+        RowOptions o = options_for("video.texture_pack",
+                                   "Use replacement textures from the textures folder in the data directory, when "
+                                   "there are any. A replacement is used at whatever size it was drawn, and is not "
+                                   "enlarged again by the scaling above. Set MGA_DUMP_TEXTURES=1 to write out every "
+                                   "texture the game draws, ready to be repainted and dropped back in.");
+        const bool present = renderer().texture_pack_available();
+        if (!present) o.note = "none found";
+        if (toggle_row("Texture pack", s.texture_pack && present, o)) {
+            s.texture_pack = !s.texture_pack;
+            renderer().set_texture_pack(s.texture_pack);
             settings::save();
         }
     }
+    section("Lighting");
+    {
+        RowOptions o = options_for(
+            "video.light_per_pixel",
+            "Works the game's lights out for every pixel instead of at the corners of every triangle. The lights, the "
+            "materials and the falloff are all the game's own -- only the place they are calculated changes. The PSP "
+            "had no choice about it, and on models of a few hundred triangles it shows: shading goes flat across each "
+            "triangle, and a highlight jumps from one corner to the next instead of sliding across a surface. Costs "
+            "almost nothing on a modern card. Off restores exactly what the hardware did.");
+        if (toggle_row("Per-pixel lighting", s.light_per_pixel, o)) {
+            s.light_per_pixel = !s.light_per_pixel;
+            renderer().set_light_per_pixel(s.light_per_pixel);
+            settings::save();
+        }
+    }
+    {
+        const float levels[4] = {0.0f, 1.0f, 2.0f, 3.5f};
+        const char *names[4] = {"Off", "Subtle", "Medium", "Strong"};
+        int level = 0;
+        for (int i = 3; i > 0; --i)
+            if (s.surface_relief >= levels[i] - 0.01f) { level = i; break; }
+        RowOptions o = options_for(
+            "video.surface_relief",
+            "Treats a texture's own light and dark as relief, so a wall lights as though the brickwork painted on it "
+            "stood out from it. On geometry this coarse a wall really is two flat triangles, and the only record of "
+            "its surface is the painting -- where the dark parts are, almost always, the parts that were recessed "
+            "when someone drew it. That is a guess rather than a measurement, so it reads well on stone, panels and "
+            "grating and less well on anything whose dark patches are just dark paint. It reads the same texture the "
+            "game draws, so a texture pack improves it for free.");
+        o.disabled = !s.light_per_pixel;
+        if (o.disabled) o.note = "needs per-pixel lighting";
+        if (const int delta = choice_row("Surface relief", names[level], o)) {
+            s.surface_relief = levels[cycle(level, delta, 4)];
+            renderer().set_surface_relief(s.surface_relief);
+            settings::save();
+        }
+    }
+    {
+        RowOptions o = options_for(
+            "video.accurate_specular",
+            "Works the highlights out from where the camera actually is. The hardware assumed a viewer looking down "
+            "one axis from infinitely far away, which was free and, in its own space, close enough -- but the lights "
+            "are now worked out in the world, where that assumption does not hold, and a highlight that cannot "
+            "depend on a viewing direction is a highlight that does not move when you move. This also brings a "
+            "Fresnel term, which brightens a surface seen edge-on: it is why a floor goes bright into the distance, "
+            "and no hardware of the era modelled it.");
+        if (toggle_row("Accurate highlights", s.accurate_specular, o)) {
+            s.accurate_specular = !s.accurate_specular;
+            renderer().set_accurate_specular(s.accurate_specular, s.fresnel);
+            settings::save();
+        }
+    }
+    {
+        const float levels[4] = {0.0f, 0.3f, 0.55f, 0.8f};
+        const char *names[4] = {"Flat", "Subtle", "Medium", "Strong"};
+        int level = 0;
+        for (int i = 3; i > 0; --i)
+            if (s.ambient_shape >= levels[i] - 0.01f) { level = i; break; }
+        RowOptions o = options_for(
+            "video.ambient_shape",
+            "Gives the ambient light a direction. The hardware filled every surface with one identical constant, so "
+            "a wall facing the light and a wall facing away from it are lifted by exactly the same amount and "
+            "nothing in shadow has any shape at all. Real ambient is light that bounced off whatever the main light "
+            "is hitting, so it arrives unevenly. The axis used is that light's own direction rather than a guess at "
+            "which way is up, because nothing here knows which way is up and a wrong guess would shade every "
+            "surface backwards.");
+        if (const int delta = choice_row("Ambient shape", names[level], o)) {
+            s.ambient_shape = levels[cycle(level, delta, 4)];
+            renderer().set_ambient_shape(s.ambient_shape);
+            settings::save();
+        }
+    }
+    {
+        RowOptions o = options_for(
+            "video.linear_light",
+            "Applies light in the space light actually adds up in. A texture holds values that were authored by eye "
+            "on a display, and the hardware multiplied one straight against a light level -- which treats an encoded "
+            "number as though it were an amount of light. That is the flat, plasticky falloff of the era: too dark "
+            "through the midtones, then abruptly white where it clips. This converts the texture first, applies the "
+            "light, and rolls the bright end off along a film curve instead of cutting it flat, so a highlight keeps "
+            "its shape and its colour as it goes bright. Only lit geometry takes the path -- the interface and the "
+            "baked scenery carry finished colours and are left exactly alone. Off is what the hardware did.");
+        if (toggle_row("Linear lighting and tonemap", s.linear_light, o)) {
+            s.linear_light = !s.linear_light;
+            renderer().set_linear_light(s.linear_light);
+            settings::save();
+        }
+    }
+    {
+        const float levels[4] = {0.30f, 0.47f, 0.80f, 1.20f};
+        const char *names[4] = {"Darker", "Neutral", "Brighter", "Brightest"};
+        int level = 1;
+        for (int i = 0; i < 4; ++i)
+            if (s.tonemap_curve >= levels[i] - 0.01f) level = i;
+        RowOptions o = options_for(
+            "video.tonemap_curve",
+            "How hard the film curve bends. Neutral leaves a mid grey exactly where the old path had it, so what "
+            "changes is the falloff and the highlights rather than the overall brightness -- which is the setting to "
+            "judge the toggle on. Either way a fully lit white surface is still white. Lower is closer to a plain "
+            "clip; higher lifts the midtones and holds on to more of the bright end.");
+        o.disabled = !s.linear_light;
+        if (o.disabled) o.note = "needs linear lighting";
+        if (const int delta = choice_row("Tonemap", names[level], o)) {
+            s.tonemap_curve = levels[cycle(level, delta, 4)];
+            renderer().set_tonemap(s.tonemap_curve);
+            settings::save();
+        }
+    }
+    {
+        const float levels[4] = {1.0f, 1.5f, 2.2f, 3.0f};
+        const char *names[4] = {"Faithful", "Brighter", "Bright", "Brightest"};
+        int level = 0;
+        for (int i = 3; i > 0; --i)
+            if (s.light_intensity >= levels[i] - 0.01f) { level = i; break; }
+        RowOptions o = options_for(
+            "video.light_intensity",
+            "How much light reaches the tonemap. The game's lights and materials are all fractions of one, so the "
+            "picture hardly ever passes full brightness and the curve's shoulder -- the whole reason for having a "
+            "curve -- has nothing to roll off. Raising this gives it something to work on, and gives bloom "
+            "something above its threshold to find. Faithful keeps the game's own levels.");
+        o.disabled = !s.linear_light;
+        if (o.disabled) o.note = "needs linear lighting";
+        if (const int delta = choice_row("Light intensity", names[level], o)) {
+            s.light_intensity = levels[cycle(level, delta, 4)];
+            renderer().set_light_intensity(s.light_intensity, s.dither);
+            settings::save();
+        }
+    }
+    section("Post-processing");
     {
         RowOptions o = options_for("video.post_process",
                                    "Shows the finished frame through a shader pass instead of copying it straight "
@@ -360,6 +521,166 @@ void Menu::video() {
         }
     }
     {
+        const float levels[4] = {0.0f, 0.3f, 0.6f, 1.0f};
+        const char *names[4] = {"Off", "Subtle", "Medium", "Strong"};
+        int level = 0;
+        for (int i = 3; i > 0; --i)
+            if (s.bloom >= levels[i] - 0.01f) { level = i; break; }
+        RowOptions o = options_for(
+            "video.bloom",
+            "A glow around bright things. A lens scatters some of the light from a bright source over what is near "
+            "it and a camera sensor blooms outright; a PSP does neither, and in rooms lit by a few hard lights the "
+            "absence reads as flatness. Only light above a threshold spills, so ordinary surfaces do not glow -- "
+            "which is the difference between bloom and a blur over the whole picture. Kept modest on purpose: this "
+            "is one pass over the finished frame rather than a chain of blurred half-size copies, so a wide glow "
+            "would show its sampling.");
+        o.disabled = !s.post_process;
+        if (o.disabled) o.note = "needs post-processing";
+        if (const int delta = choice_row("Bloom", names[level], o)) {
+            s.bloom = levels[cycle(level, delta, 4)];
+            renderer().set_bloom(s.bloom);
+            settings::save();
+        }
+    }
+    {
+        const float levels[4] = {0.0f, 0.35f, 0.65f, 1.0f};
+        const char *names[4] = {"Off", "Subtle", "Medium", "Strong"};
+        int level = 0;
+        for (int i = 3; i > 0; --i)
+            if (s.reflections >= levels[i] - 0.01f) { level = i; break; }
+        RowOptions o = options_for("video.reflections",
+                                  "Reflections on the floor, traced through the picture itself. Floors only: "
+                                  "nothing in the game says which surfaces are polished, so this asks which ones "
+                                  "face up. It can only reflect what is already on screen, so expect it to do most "
+                                  "in an open room and least in a corridor seen from above.");
+        if (const int delta = choice_row("Floor reflections", names[level], o)) {
+            s.reflections = levels[cycle(level, delta, 4)];
+            renderer().set_reflections(s.reflections);
+            settings::save();
+        }
+    }
+    {
+        const float levels[4] = {0.0f, 0.4f, 0.7f, 1.0f};
+        const char *names[4] = {"Off", "Subtle", "Medium", "Strong"};
+        int level = 0;
+        for (int i = 3; i > 0; --i)
+            if (s.depth_of_field >= levels[i] - 0.01f) { level = i; break; }
+        RowOptions o = options_for("video.depth_of_field",
+                                  "The background goes soft with distance, focused on whatever is under the middle "
+                                  "of the screen. Drawn before the heads-up display, so the display stays sharp. "
+                                  "Nothing nearer than the focal plane is ever blurred: a real lens would blur it, "
+                                  "and here that would mostly be Snake's own shoulder.");
+        if (const int delta = choice_row("Depth of field", names[level], o)) {
+            s.depth_of_field = levels[cycle(level, delta, 4)];
+            renderer().set_depth_of_field(s.depth_of_field);
+            settings::save();
+        }
+    }
+    {
+        const float levels[4] = {0.0f, 0.35f, 0.65f, 1.0f};
+        const char *names[4] = {"Off", "Light", "Medium", "Strong"};
+        int level = 0;
+        for (int i = 3; i > 0; --i)
+            if (s.sharpen >= levels[i] - 0.01f) { level = i; break; }
+        RowOptions o = options_for("video.sharpen",
+                                  "Puts back the edge definition that magnifying a 480x272 picture takes out. It "
+                                  "measures how much room each neighbourhood has left before it would clip, so it "
+                                  "does not leave the pale outlines an ordinary sharpen does. Strong on top of "
+                                  "anti-aliasing will fight it: the one softens edges and the other hardens them.");
+        o.disabled = !s.post_process;
+        if (o.disabled) o.note = "needs post-processing";
+        if (const int delta = choice_row("Sharpening", names[level], o)) {
+            s.sharpen = levels[cycle(level, delta, 4)];
+            renderer().set_sharpen(s.sharpen);
+            settings::save();
+        }
+    }
+    {
+        const float levels[4] = {0.0f, 0.35f, 0.7f, 1.0f};
+        const char *names[4] = {"Off", "Subtle", "Medium", "Strong"};
+        int level = 0;
+        for (int i = 3; i > 0; --i)
+            if (s.colour_grade >= levels[i] - 0.01f) { level = i; break; }
+        RowOptions o = options_for("video.colour_grade",
+                                  "How far the picture is taken towards the grade below. The art was drawn for a "
+                                  "small, dim screen, and on a modern one it reads as washed out. Subtle is the "
+                                  "point: turned up far this stops looking like a better screen and starts looking "
+                                  "like a filter.");
+        o.disabled = !s.post_process;
+        if (o.disabled) o.note = "needs post-processing";
+        if (const int delta = choice_row("Colour", names[level], o)) {
+            s.colour_grade = levels[cycle(level, delta, 4)];
+            renderer().set_colour_grade(s.colour_grade);
+            settings::save();
+        }
+    }
+    {
+        // Which grade the strength above is taken towards: the built-in
+        // contrast and saturation lift, or a .cube from the grades folder.
+        //
+        // Scanned once rather than every frame. Reading a directory from
+        // inside a draw is not free, and a grade appearing while the menu is
+        // open is not a case worth paying for -- the game finds it next time
+        // it starts.
+        static const std::vector<std::string> grades = [] {
+            std::vector<std::string> found;
+            std::error_code code;
+            for (const auto &entry :
+                 std::filesystem::directory_iterator(install::user_data_directory() / "grades", code)) {
+                if (!entry.is_regular_file(code)) continue;
+                std::string extension = entry.path().extension().string();
+                std::transform(extension.begin(), extension.end(), extension.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                if (extension == ".cube") found.push_back(entry.path().filename().string());
+            }
+            std::sort(found.begin(), found.end());
+            return found;
+        }();
+        static std::string failure;
+
+        std::vector<std::string> names{"Built-in"};
+        names.insert(names.end(), grades.begin(), grades.end());
+        int index = 0;
+        for (std::size_t i = 1; i < names.size(); ++i)
+            if (names[i] == s.colour_lut) { index = static_cast<int>(i); break; }
+        // A grade named in the settings whose file is no longer there. Shown
+        // rather than quietly reset, because the picture is not the one the
+        // settings claim and the player should be able to see why.
+        const bool missing = index == 0 && !s.colour_lut.empty();
+        if (missing) {
+            names.push_back(s.colour_lut);
+            index = static_cast<int>(names.size()) - 1;
+        }
+
+        RowOptions o = options_for("video.colour_lut",
+                                  "The grade itself. Built-in is a contrast and saturation lift with two constants "
+                                  "in it. A .cube is a colour grading table, which is what every grading tool "
+                                  "exports: make a grade somewhere that shows you the picture while you turn the "
+                                  "knobs, save it into the grades folder beside settings.ini, and it appears here.");
+        o.disabled = !s.post_process;
+        if (o.disabled) o.note = "needs post-processing";
+        else if (missing) o.note = "file not found";
+        else if (!failure.empty()) o.note = failure;
+        else if (grades.empty()) o.note = "no .cube files in the grades folder";
+        if (const int delta = choice_row("Grade", names[index], o)) {
+            const int wanted = cycle(index, delta, static_cast<int>(names.size()));
+            failure.clear();
+            if (wanted == 0) {
+                renderer().clear_colour_lut();
+                s.colour_lut.clear();
+                settings::save();
+            } else if (renderer().set_colour_lut(install::user_data_directory() / "grades" / names[wanted],
+                                                 failure)) {
+                s.colour_lut = names[wanted];
+                settings::save();
+            }
+            // On a failure the setting is left alone: `failure` becomes the
+            // row's note, and the grade that is actually on screen stays the
+            // one the row shows.
+        }
+    }
+    section("Shadows");
+    {
         // Off, Subtle, Medium, Strong. A float rather than a flag so the
         // strength can be tuned without another setting.
         const float levels[4] = {0.0f, 0.35f, 0.6f, 1.0f};
@@ -375,24 +696,6 @@ void Menu::video() {
         if (const int delta = choice_row("Contact shadows", names[level], o)) {
             s.contact_shadows = levels[cycle(level, delta, 4)];
             renderer().set_contact_shadows(s.contact_shadows);
-            settings::save();
-        }
-    }
-    {
-        const float levels[4] = {0.0f, 0.35f, 0.7f, 1.0f};
-        const char *names[4] = {"Off", "Subtle", "Medium", "Strong"};
-        int level = 0;
-        for (int i = 3; i > 0; --i)
-            if (s.colour_grade >= levels[i] - 0.01f) { level = i; break; }
-        RowOptions o = options_for("video.colour_grade",
-                                  "Lifts contrast and saturation a little. The art was drawn for a small, dim "
-                                  "screen, and on a modern one it reads as washed out. Subtle is the point: turned "
-                                  "up far this stops looking like a better screen and starts looking like a filter.");
-        o.disabled = !s.post_process;
-        if (o.disabled) o.note = "needs post-processing";
-        if (const int delta = choice_row("Colour", names[level], o)) {
-            s.colour_grade = levels[cycle(level, delta, 4)];
-            renderer().set_colour_grade(s.colour_grade);
             settings::save();
         }
     }
@@ -431,20 +734,42 @@ void Menu::video() {
         }
     }
     {
-        RowOptions o = options_for("video.texture_pack",
-                                   "Use replacement textures from the textures folder in the data directory, when "
-                                   "there are any. A replacement is used at whatever size it was drawn, and is not "
-                                   "enlarged again by the scaling above. Set MGA_DUMP_TEXTURES=1 to write out every "
-                                   "texture the game draws, ready to be repainted and dropped back in.");
-        const bool present = renderer().texture_pack_available();
-        if (!present) o.note = "none found";
-        if (toggle_row("Texture pack", s.texture_pack && present, o)) {
-            s.texture_pack = !s.texture_pack;
-            renderer().set_texture_pack(s.texture_pack);
+        const float levels[4] = {0.0f, 0.25f, 0.5f, 0.85f};
+        const char *names[4] = {"Off", "Subtle", "Medium", "Strong"};
+        int level = 0;
+        for (int i = 3; i > 0; --i)
+            if (s.volumetric >= levels[i] - 0.01f) { level = i; break; }
+        RowOptions o = options_for(
+            "video.volumetric",
+            "Light in the air, not just on surfaces. The same map the shadows are cast from is asked the same "
+            "question repeatedly along the line from the eye to whatever it is looking at -- was anything standing "
+            "in the light's way here -- and the answers are added up. Where that line runs through open light the "
+            "air glows; where it runs behind a railing or a doorway a shaft appears with the caster's shape cut out "
+            "of it. It needs a light that casts, so it follows the shadow setting above, and it costs a march of "
+            "twenty-four samples a pixel.");
+        o.disabled = s.shadow_maps <= 0.0f || !renderer().volumetric_available();
+        if (o.disabled) o.note = s.shadow_maps <= 0.0f ? "needs cast shadows" : "unavailable";
+        if (const int delta = choice_row("Light shafts", names[level], o)) {
+            s.volumetric = levels[cycle(level, delta, 4)];
+            renderer().set_volumetric(s.volumetric);
             settings::save();
         }
     }
-    section("Timing");
+    section("Frame pacing");
+    {
+        RowOptions o = options_for(
+            "video.frame_smoothing",
+            "Shows an extra image between the game's own frames, worked out by carrying the motion in the last two "
+            "forward. Metal Gear Ac!d draws thirty frames a second and takes exactly one step of its simulation per "
+            "frame, so it cannot be asked for more without the whole game running at double speed -- the frames in "
+            "between have to be invented instead. Motion is predicted rather than known, so something that stops or "
+            "reverses sharply can overshoot for half a frame. The interface and anything else laid out to the pixel "
+            "is left exactly where the game put it.");
+        if (toggle_row("Frame smoothing", s.frame_smoothing, o)) {
+            s.frame_smoothing = !s.frame_smoothing;
+            settings::save();
+        }
+    }
     {
         struct Mode {
             settings::PresentMode mode;
@@ -487,7 +812,7 @@ void Menu::video() {
     }
     font_rows();
     ImGui::Dummy({0.0f, font_gap()});
-    if (button_row("Restore video defaults", {false, {}, "Every setting on this page back to how Yakumo ships."})) {
+    if (button_row("Restore video defaults", {false, {}, "Every setting on this page back to how PSPRecomp ships."})) {
         const settings::Settings &d = settings::defaults();
         const auto restore = [&](const char *key, auto &value, const auto &fallback) {
             if (settings::overridden_by(key) == nullptr) value = fallback;
@@ -496,6 +821,9 @@ void Menu::video() {
         restore("video.fullscreen", s.fullscreen, d.fullscreen);
         restore("video.window_scale", s.window_scale, d.window_scale);
         restore("video.keep_aspect", s.keep_aspect, d.keep_aspect);
+        restore("video.pixel_perfect", s.pixel_perfect, d.pixel_perfect);
+        restore("video.light_per_pixel", s.light_per_pixel, d.light_per_pixel);
+        restore("video.bloom", s.bloom, d.bloom);
         restore("video.sharp_screen", s.sharp_screen, d.sharp_screen);
         restore("video.sharp_textures", s.sharp_textures, d.sharp_textures);
         restore("video.smooth_textures", s.smooth_textures, d.smooth_textures);
@@ -510,6 +838,16 @@ void Menu::video() {
         renderer().set_window_scale(s.window_scale);
         renderer().set_keep_aspect(s.keep_aspect);
         renderer().set_pixel_perfect(s.pixel_perfect);
+        renderer().set_light_per_pixel(s.light_per_pixel);
+        renderer().set_linear_light(s.linear_light);
+        renderer().set_tonemap(s.tonemap_curve);
+        renderer().set_volumetric(s.volumetric);
+        renderer().set_surface_relief(s.surface_relief);
+        renderer().set_field_of_view(s.field_of_view);
+        renderer().set_accurate_specular(s.accurate_specular, s.fresnel);
+        renderer().set_ambient_shape(s.ambient_shape);
+        renderer().set_light_intensity(s.light_intensity, s.dither);
+        renderer().set_bloom(s.bloom);
         renderer().set_sharp_screen(s.sharp_screen);
         renderer().set_sharp_textures(s.sharp_textures);
         renderer().set_smooth_textures(s.smooth_textures);
@@ -726,7 +1064,7 @@ void Menu::controls() {
         }
     }
 
-    section("Hunter name");
+    section("Name entry");
     {
         const bool keyboard = s.name_entry == settings::NameEntry::Keyboard;
         if (choice_row("When the game asks for a name", keyboard ? "On-screen keyboard" : "Use the name below",
@@ -758,7 +1096,7 @@ void Menu::controls() {
     }};
     for (const auto &[key, button] : kKeys) info_row(key, button);
     ImGui::Dummy({0.0f, font_gap()});
-    if (button_row("Restore control defaults", {false, {}, "Every gamepad and name setting back to how Yakumo ships."})) {
+    if (button_row("Restore control defaults", {false, {}, "Every gamepad and name setting back to how PSPRecomp ships."})) {
         const settings::Settings &d = settings::defaults();
         const auto restore = [&](const char *key, auto &value, const auto &fallback) {
             if (settings::overridden_by(key) == nullptr) value = fallback;
@@ -841,16 +1179,15 @@ std::string &saved_log_path() {
     return path;
 }
 
-// "MHP3Q000" is Hall 01 in the game's list.
-std::string group_name(const std::string &group) {
-    if (group.size() == 8u && group.compare(0, 5, "MHP3Q") == 0 &&
-        std::all_of(group.begin() + 5, group.end(), [](char c) { return c >= '0' && c <= '9'; })) {
-        char text[16];
-        std::snprintf(text, sizeof(text), "Hall %02d", std::atoi(group.c_str() + 5) + 1);
-        return text;
-    }
-    return group;
-}
+// Ad hoc group codes are the game's own, and only the game knows what they
+// mean. Monster Hunter's were "MHP3Q000" and so on, one per Gathering Hall,
+// and this turned them into "Hall 01" -- which was worth doing there and is
+// meaningless here: Metal Gear Ac!d names its groups differently, that prefix
+// never matches, and the row falls through to the raw code anyway. The
+// translation is gone rather than rewritten, because nothing yet knows what
+// Ac!d's codes mean, and inventing a mapping that might be wrong is worse than
+// showing the code the game actually chose.
+std::string group_name(const std::string &group) { return group; }
 
 std::string players_text(std::size_t count) {
     return std::to_string(count) + (count == 1u ? " player" : " players");
@@ -866,8 +1203,8 @@ void play_together() {
         const adhoc::ServerStatus status = adhoc_host_status();
         const std::string suffix =
             status.adhocctl_port == adhoc::kAdhocctlPort ? std::string() : ":" + std::to_string(status.adhocctl_port);
-        info_row("Hosting", players_text(status.players.size()) + " connected. Everyone now enters the Online Guild "
-                                                                  "Hall and picks the same hall.");
+        info_row("Hosting", players_text(status.players.size()) + " connected. Everyone now starts a Link Battle "
+                                                                  "and joins the same session.");
         const std::vector<adhoc::LocalAddress> addresses = adhoc::local_addresses();
         if (addresses.empty()) info_row("Your addresses", "No network is connected");
         for (const adhoc::LocalAddress &address : addresses) {
@@ -904,7 +1241,7 @@ void play_together() {
         if (button_row("Host a session###hosting",
                        {false, {},
                         "Runs a server in this game for the others to join: no other program, no port forwarding "
-                        "on a local network or a VPN. Then everyone enters the Online Guild Hall."}))
+                        "on a local network or a VPN. Then everyone starts a Link Battle."}))
             adhoc_host_start();
         if (const std::string error = adhoc_host_error(); !error.empty()) info_row("Cannot host", error);
     }
@@ -923,7 +1260,7 @@ void play_together() {
         const std::string label = (joined(address) ? "Joined " : "Join ") + host.info.name + "   " + address + ", " +
                                   players_text(host.info.players) + "###found " + std::to_string(host.info.session);
         if (button_row(label.c_str(), {false, {}, "A session hosted on this network. Joining it takes you out of any "
-                                                  "other; then enter the Online Guild Hall."}))
+                                                  "other; then start a Link Battle."}))
             adhoc_join(address);
     }
     if (hosts.empty()) info_row("On this network", "Looking for hosted sessions…");
@@ -1100,14 +1437,14 @@ void Menu::system() {
         s.menu_pause_multiplayer = !s.menu_pause_multiplayer;
         settings::save();
     }
-    if (button_row("Open the data folder", {false, {}, "Show Yakumo's data folder in the file manager."})) {
+    if (button_row("Open the data folder", {false, {}, "Show PSPRecomp's data folder in the file manager."})) {
         if (!SDL_OpenURL(file_url(data_dir).c_str()))
             std::cout << "[menu] cannot open " << data_dir << ": " << SDL_GetError() << "\n";
     }
     if (button_row("Set up game data again…",
                    {false, {}, "Choose the disc image again, for example after moving it. The game closes first."}))
         confirm_ = Confirm::Setup;
-    if (button_row("Quit game", {false, {}, "Close Yakumo. Progress since your last save is lost."},
+    if (button_row("Quit game", {false, {}, "Close PSPRecomp. Progress since your last save is lost."},
                    colors::kDanger))
         confirm_ = Confirm::Quit;
 
@@ -1168,7 +1505,7 @@ void Menu::system() {
     }
 
     section("About");
-    info_row("Yakumo", std::string(kYakumoVersion));
+    info_row("PSPRecomp", std::string(kYakumoVersion));
     info_row("Game", std::string(install::kGameTitle) + " (" + install::kDiscIdDisplay + ")");
     info_row("Data folder", data_dir);
     if (!savedata::memory_stick().empty())
@@ -1196,7 +1533,7 @@ bool Menu::confirm_dialog() {
         const bool quit = confirm_ == Confirm::Quit;
         heading(quit ? "Quit the game?" : "Set up game data again?");
         paragraph(quit ? "Progress since your last save is lost."
-                       : "Yakumo closes the game and opens the setup, where you choose the disc image again. "
+                       : "PSPRecomp closes the game and opens the setup, where you choose the disc image again. "
                          "Progress since your last save is lost.",
                   colors::kTextDim);
         ImGui::Dummy({0.0f, font * 0.6f});

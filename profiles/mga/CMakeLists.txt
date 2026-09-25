@@ -46,12 +46,18 @@ if(MGA_RENDERER)
                     "kPostFragmentShader=${MGA_PROFILE_DIR}/host/gpu/shaders/post.frag"
                     "kAoFragmentShader=${MGA_PROFILE_DIR}/host/gpu/shaders/ao.frag"
                     "kShadowVertexShader=${MGA_PROFILE_DIR}/host/gpu/shaders/shadow.vert"
+                    "kVolumetricFragmentShader=${MGA_PROFILE_DIR}/host/gpu/shaders/volumetric.frag"
+                    "kDofFragmentShader=${MGA_PROFILE_DIR}/host/gpu/shaders/dof.frag"
+                    "kReflectFragmentShader=${MGA_PROFILE_DIR}/host/gpu/shaders/reflect.frag"
             DEPENDS "${MGA_PROFILE_DIR}/host/gpu/shaders/ge.vert"
                     "${MGA_PROFILE_DIR}/host/gpu/shaders/ge.frag"
                     "${MGA_PROFILE_DIR}/host/gpu/shaders/post.vert"
                     "${MGA_PROFILE_DIR}/host/gpu/shaders/post.frag"
                     "${MGA_PROFILE_DIR}/host/gpu/shaders/ao.frag"
                     "${MGA_PROFILE_DIR}/host/gpu/shaders/shadow.vert"
+                    "${MGA_PROFILE_DIR}/host/gpu/shaders/volumetric.frag"
+                    "${MGA_PROFILE_DIR}/host/gpu/shaders/dof.frag"
+                    "${MGA_PROFILE_DIR}/host/gpu/shaders/reflect.frag"
                     "${MGA_PROFILE_DIR}/tools/embed_shaders.py"
             COMMENT "Compiling GE shaders to SPIR-V")
         add_custom_target(mga_shaders DEPENDS "${MGA_SHADER_INC}")
@@ -110,12 +116,15 @@ set(MGA_HOST_SOURCES
     host/gpu/ge_state_serialise.cpp
     host/gpu/texture_decode.cpp
     host/gpu/shadow_map.cpp
+    host/gpu/colour_lut.cpp
     "${PSP_COMMON_DIR}/texture_pack.cpp"
     "${PSP_COMMON_DIR}/texture_scale.cpp"
     host/perf/frame_stats.cpp
     host/perf/perf_overlay.cpp
     host/overlays.cpp
     host/mga_profile.cpp
+    host/kernel/fast_loading.cpp
+    host/kernel/load_detector.cpp
     host/kernel/scene.cpp
     host/kernel/kernel.cpp
     host/kernel/kernel_state.cpp
@@ -366,6 +375,29 @@ endif()
 set_target_properties(mga_state_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 if(PSPRECOMP_BUILD_TESTS)
     add_test(NAME mga_state_tests COMMAND mga_state_tests)
+endif()
+
+# The fast-loading detector on its own: that it runs ahead while the game is
+# reading the disc in silence, and that every guard -- sound, a held button, a
+# movie, ad hoc play, the menu -- stops it. No host and no game data.
+add_executable(mga_fast_loading_tests
+    tests/fast_loading_tests.cpp
+    host/kernel/load_detector.cpp)
+target_include_directories(mga_fast_loading_tests PRIVATE "${MGA_PROFILE_DIR}/host")
+set_target_properties(mga_fast_loading_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+if(PSPRECOMP_BUILD_TESTS)
+    add_test(NAME mga_fast_loading_tests COMMAND mga_fast_loading_tests)
+endif()
+
+# The .cube colour grading reader: the files it has to understand exactly, and
+# the ones it has to refuse for a stated reason.
+add_executable(mga_colour_lut_tests
+    tests/colour_lut_tests.cpp
+    host/gpu/colour_lut.cpp)
+target_include_directories(mga_colour_lut_tests PRIVATE "${MGA_PROFILE_DIR}/host")
+set_target_properties(mga_colour_lut_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+if(PSPRECOMP_BUILD_TESTS)
+    add_test(NAME mga_colour_lut_tests COMMAND mga_colour_lut_tests)
 endif()
 
 # Replacement textures: that a dump reads back exactly, and that every PNG

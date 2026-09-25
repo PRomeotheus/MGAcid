@@ -75,3 +75,7 @@ overlay_*.bin
 __pycache__/
 *.pyc
 .DS_Store
+
+# Texture dumps: qar.py pack writes a couple of thousand PNGs here, and
+# upscale_textures.py reads them. Derived from the disc, so never committed.
+dumps/

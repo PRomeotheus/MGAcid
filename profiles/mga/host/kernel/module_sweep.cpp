@@ -18,6 +18,7 @@ constexpr const char *kStageDirectory = "PSP_GAME/USRDIR/stage";
 
 struct Sweep {
     bool started{};
+    unsigned seen{};  // the game's own stage starts so far
     std::vector<std::string> remaining;  // paths on the disc, still to do
     std::size_t done{};
     std::size_t failed{};
@@ -123,6 +124,19 @@ bool sweep_take_over(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ct
     if (module.name != "mgp_stage") return false;
 
     Sweep &state = sweep();
+    // Let this many of the game's own stages past first, so the sweep inherits
+    // the load address they are using rather than the boot one. See the header.
+    static const unsigned skip = [] {
+        const char *text = std::getenv("MGA_SWEEP_AFTER");
+        return text != nullptr ? static_cast<unsigned>(std::strtoul(text, nullptr, 0)) : 0u;
+    }();
+    if (state.seen++ < skip) {
+        std::cout << "[sweep] letting the game start " << module.name << " at " << psprecomp::hex32(module.base)
+                  << " (" << state.seen << " of " << skip << " before taking over)\n";
+        return false;
+    }
+    std::cout << "[sweep] the module manager is placing stages at " << psprecomp::hex32(module.base)
+              << "; corpora from this sweep are only valid there\n";
     state.started = true;
     state.remaining = stage_modules();
     std::cout << "[sweep] taking over at the game's first stage; " << state.remaining.size()

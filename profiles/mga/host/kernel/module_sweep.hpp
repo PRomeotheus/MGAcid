@@ -28,6 +28,22 @@
 // are the proof -- a sweep that does not reproduce them byte for byte is
 // wrong, and says so.
 //
+// Which base it sweeps at
+// -----------------------
+// A recompiled corpus has its addresses baked in, so it is only valid at the
+// address it was generated for -- and Ac!d does not load every stage at the
+// same one. The boot sequence (init, title, intermission) loads while little
+// else is allocated and lands at 0x09B38700; the first gameplay stage loads
+// later, with the game's pools in place, and lands at 0x09B61100. A corpus
+// built for the first address is never even consulted at the second, which the
+// module loader says out loud: "(interpreted)" rather than "(recompiled)".
+//
+// The sweep loads every stage at whatever address the module manager gives it,
+// which is the address the stage it took over from was using. So MGA_SWEEP_AFTER
+// says how many of the game's own stage starts to let past first: 0 sweeps at
+// the boot address, and 3 -- past init, title and intermission -- sweeps at the
+// gameplay one.
+//
 // When it runs
 // ------------
 // A stage links against the executable's state, so the sweep cannot run before

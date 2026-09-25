@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -317,18 +318,33 @@ const LoadedModule *load_module(Runtime &runtime, std::vector<std::uint8_t> imag
     const bool no_corpora =
         no_corpora_all || (no_corpora_names != nullptr && std::string_view(no_corpora_names).find(module->name) !=
                                                               std::string_view::npos);
+    // A module can have a corpus for more than one address, because Ac!d does
+    // not always load one at the same place: the boot sequence loads a stage
+    // while little else is allocated, and a gameplay stage loads with the
+    // game's pools in place, some 160 KiB higher. Both are generated, so the
+    // search has to keep looking past a corpus for the wrong address rather
+    // than stop at the first one that shares a name -- which it used to, and
+    // which would have left a module interpreted with its own corpus sitting
+    // right there in the table.
+    const ModuleCorpus *match = nullptr;
+    std::vector<std::uint32_t> other_bases;
     for (const ModuleCorpus &corpus : module_corpora()) {
         if (module->name != corpus.name || corpus.image_hash != image_hash) continue;
-        if (corpus.base != base) {
-            std::cerr << "[module] " << module->name << " was recompiled for " << psprecomp::hex32(corpus.base)
-                      << " but loaded at " << psprecomp::hex32(base)
-                      << "; interpreting it (run scripts/generate_modules.sh again)\n";
+        if (corpus.base == base) {
+            match = &corpus;
             break;
         }
-        if (no_corpora) break;
-        corpus.install(runtime);
+        other_bases.push_back(corpus.base);
+    }
+    if (match != nullptr && !no_corpora) {
+        match->install(runtime);
         code = "recompiled";
-        break;
+    } else if (match == nullptr && !other_bases.empty()) {
+        std::cerr << "[module] " << module->name << " loaded at " << psprecomp::hex32(base)
+                  << " but is only recompiled for";
+        for (const std::uint32_t other : other_bases) std::cerr << " " << psprecomp::hex32(other);
+        std::cerr << "; interpreting it (MGA_STAGE_BASE=" << psprecomp::hex32(base)
+                  << " scripts/generate_modules.sh covers this one)\n";
     }
 
     std::cout << "[module] loaded " << module->name << " (" << psprecomp::hex32(image_hash) << ", " << code << ") at "
@@ -366,6 +382,11 @@ void dump_module(Runtime &runtime, const LoadedModule &module) {
     if (dir == nullptr) return;
     std::vector<std::uint8_t> image(module.size);
     runtime.memory().copy_out(module.base, image);
+    // Made rather than assumed: a dump run that names a directory which does
+    // not exist used to fail once per module and carry on, so the run looked
+    // like it had worked and produced nothing.
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
     const std::string path =
         std::string(dir) + "/" + module.name + "_" + psprecomp::hex32(module.image_hash) + ".bin";
     if (std::FILE *out = std::fopen(path.c_str(), "wb")) {

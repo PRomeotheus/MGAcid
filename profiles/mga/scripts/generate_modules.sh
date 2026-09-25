@@ -9,6 +9,16 @@
 # "title prologue st01". Stages are generated from their code as the game
 # patches it after loading (tools/stage_link.py).
 #
+# MGA_STAGE_BASE is the address the corpus is generated for, and it matters:
+# a corpus is only valid at its own address, and Ac!d does not load every stage
+# at the same one. The boot sequence -- init, title, intermission -- loads while
+# little else is allocated and lands at 0x09B38700; a gameplay stage loads with
+# the game's pools in place and lands at 0x09B61100. Collect a dump at each with
+# MGA_SWEEP_AFTER (see host/kernel/module_sweep.hpp) and run this once per base
+# with the stages that use it. The module loader prints "(interpreted)" rather
+# than "(recompiled)" for a stage whose corpus is at the wrong address, so a
+# mistake here is visible in the first run rather than silent.
+#
 # Needs game/disc.iso (scripts/prepare_game.sh) and a framework build in
 # build_dir (default out/mga). Output: profiles/mga/modules/<prefix>/, which is
 # derived from the game and ignored by Git. Reconfigure and rebuild afterwards.
@@ -45,10 +55,22 @@ mkdir -p "$extract_dir"
 link="$profile_dir/tools/stage_link.py"
 
 # generate <prefix> <prx> <module name> <load address> [file to generate from]
+#
+# Returns non-zero rather than leaving, and shows what psp_recomp said. Its
+# output used to go to /dev/null and one failure ended the whole run, so a
+# single awkward stage cost the other forty-three and took its reason with it.
+failed=""
 generate() {
     local prefix="$1" prx="$2" name="$3" base="$4" source="${5:-$2}"
     local out="$profile_dir/modules/$prefix"
-    "$build_dir/psp_recomp$exe" "$source" --auto "$out" "$base" --prefix "$prefix" > /dev/null 2>&1 || { echo "psp_recomp failed for $prefix" >&2; exit 1; }
+    local log="$profile_dir/modules/$prefix.log"
+    if ! "$build_dir/psp_recomp$exe" "$source" --auto "$out" "$base" --prefix "$prefix" > "$log" 2>&1; then
+        echo "  $prefix: psp_recomp failed --" >&2
+        tail -12 "$log" | sed 's/^/      /' >&2
+        failed="$failed $prefix"
+        return 1
+    fi
+    rm -f "$log"
     printf 'name=%s\nbase=%s\nprefix=%s\nhash=%s\n' "$name" "$base" "$prefix" \
         "$("$python" "$link" hash "$prx")" > "$out/module.txt"
     echo "  $prefix: $name at $base"
@@ -64,8 +86,15 @@ done
 # corpus can only be generated from the module as it is in memory afterwards.
 # Play with MGA_DUMP_MODULES=<dir> to collect those dumps; each is named after
 # the hash of the PRX it came from, which is how they are matched up here.
-# Every stage loads at the same address, once the one before it is unloaded.
-stage_base=0x09B38700
+#
+# A stage is named after the address its corpus is for as well as after itself,
+# so the same stage can have one for each address the game loads it at. It does
+# happen: intermission appears during the boot sequence, at the low address,
+# and again between gameplay stages, at the high one. The module loader matches
+# on name, hash and address together and takes whichever fits.
+stage_base="${MGA_STAGE_BASE:-0x09B38700}"
+base_tag=""
+[[ "$stage_base" != "0x09B38700" ]] && base_tag="_$(printf '%x' $((stage_base)))"
 stages="${MGA_STAGES:-all}"
 dump_dir="${MGA_DUMP_DIR:-$profile_dir/game/dumps}"
 if [[ "$stages" != "none" ]]; then
@@ -76,7 +105,7 @@ if [[ "$stages" != "none" ]]; then
         if [[ "$stages" != "all" && " $stages " != *" $stage "* ]]; then continue; fi
         hash="$("$python" "$link" hash "$prx")"
         dump="$dump_dir/mgp_stage_$hash.bin"
-        rm -rf "$profile_dir/modules/stage_$stage"
+        rm -rf "$profile_dir/modules/stage_$stage$base_tag"
         if [[ ! -f "$dump" ]]; then
             missing="$missing $stage"
             continue
@@ -93,12 +122,15 @@ if [[ "$stages" != "none" ]]; then
         else
             "$python" "$link" fromdump "$prx" "$dump" "$linked" > /dev/null
         fi
-        generate "stage_$stage" "$prx" mgp_stage "$stage_base" "$linked"
+        generate "stage_$stage$base_tag" "$prx" mgp_stage "$stage_base" "$linked" || true
     done
     if [[ -n "$missing" ]]; then
         echo "no dump yet for:$missing"
         echo "  play with MGA_DUMP_MODULES=$dump_dir until those stages have been loaded,"
         echo "  then run this script again."
     fi
+fi
+if [[ -n "$failed" ]]; then
+    echo "these could not be generated and will be interpreted:$failed" >&2
 fi
 echo "module corpora in $profile_dir/modules; now run: cmake -S . -B out/mga && cmake --build out/mga --target MGAcid"

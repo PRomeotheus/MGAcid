@@ -13,9 +13,11 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -269,8 +271,50 @@ bool install_overlay_for(Runtime &runtime, std::uint32_t pc) {
     return false;
 }
 
+// MGA_PROBE_CODE=<dir>: write out the memory around code that no module
+// claims, so it can be identified.
+//
+// The slot list and the image header above came from another game, whose
+// overlays announce themselves with a "MWo3" magic and their own load address.
+// Ac!d's do not, so none of that machinery recognises them and every miss goes
+// straight to the interpreter -- which is correct, and slow. Before a slot can
+// be declared, somebody has to find out what the game is putting there.
+//
+// This writes a window either side of the miss. Ac!d's archives can be read
+// offline (tools/stage_link.py unpacks them), so the file this produces can be
+// searched for in them, which names the thing rather than guessing at it.
+void probe_unclaimed_code(const psprecomp::GuestMemory &memory, std::uint32_t pc) {
+    const char *directory = std::getenv("MGA_PROBE_CODE");
+    if (directory == nullptr) {
+        log_once("probe-hint", "[probe] code at " + psprecomp::hex32(pc) +
+                                   " belongs to no module; set MGA_PROBE_CODE=<dir> to dump the memory around it");
+        return;
+    }
+    // One window per 64 KiB region, so a thousand misses inside the same blob
+    // write one file rather than a thousand.
+    constexpr std::uint32_t kWindow = 64u * 1024u;
+    const std::uint32_t region = pc & ~(kWindow - 1u);
+    static std::set<std::uint32_t> probed;
+    if (!probed.insert(region).second) return;
+    const std::uint32_t start = region > kWindow ? region - kWindow : 0u;
+    const std::vector<std::uint8_t> image = read_guest(memory, start, kWindow * 3u);
+    std::error_code ec;
+    std::filesystem::create_directories(directory, ec);
+    const std::string path = std::string(directory) + "/code_" + psprecomp::hex32(start) + ".bin";
+    if (std::ofstream out(path, std::ios::binary); out) {
+        out.write(reinterpret_cast<const char *>(image.data()), static_cast<std::streamsize>(image.size()));
+        std::cout << "[probe] wrote " << path << " (" << image.size() / 1024u << " KiB from "
+                  << psprecomp::hex32(start) << ", the miss was at " << psprecomp::hex32(pc) << ")\n";
+    } else {
+        std::cerr << "[probe] cannot write " << path << "\n";
+    }
+}
+
 bool missing_function_hook(Runtime &runtime, AllegrexContext &, std::uint32_t pc) {
-    return install_overlay_for(runtime, pc);
+    if (install_overlay_for(runtime, pc)) return true;
+    // Nothing claimed it. Say so usefully rather than silently interpreting.
+    if (slot_of(pc).first == 0u) probe_unclaimed_code(runtime.memory(), pc);
+    return false;
 }
 
 // Generated overlay code that no longer matches memory decodes as nonsense. If

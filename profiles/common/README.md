@@ -38,12 +38,24 @@ it decodes them, so there is nothing to enlarge until the game has actually
 drawn the things you want enlarged.
 
 ```
-MGA_DUMP_TEXTURES=1 out/mga/bin/MGAcid.exe      # play through what you care about
 pip install torch pillow numpy
 curl -LO https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth
-python3 profiles/common/tools/upscale_textures.py <data>/textures/dump <data>/textures --list
-python3 profiles/common/tools/upscale_textures.py <data>/textures/dump <data>/textures
+python3 profiles/common/tools/upscale_textures.py <dump> <data>/textures --list
+python3 profiles/common/tools/upscale_textures.py <dump> <data>/textures
 ```
+
+`<dump>` is a folder of PNGs named by content key. Two things produce one:
+`MGA_DUMP_TEXTURES=1` while playing, which gets what you walked past, or, for
+Metal Gear Ac!d, `tools/qar.py pack` which reads them straight out of the
+archives and needs no playthrough at all.
+
+**On a GPU.** `pip install torch` gives the CPU build on Windows, and the
+difference is hours against minutes -- a couple of thousand textures is an
+afternoon on a CPU and a coffee on a mid-range card. The wheel that matches
+your CUDA version is at https://pytorch.org/get-started/locally/. The script
+says which device it picked on its first line, and says so plainly when torch
+reports no CUDA device, because otherwise the only symptom is that it is slow.
+`--device cpu` forces the old behaviour.
 
 `--list` classifies everything and writes nothing, which is the right first run:
 it shows what would be enlarged and what would be left alone, and the answer to

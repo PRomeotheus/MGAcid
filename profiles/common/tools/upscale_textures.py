@@ -110,12 +110,14 @@ def is_pixel_art(image: Image.Image) -> tuple[bool, str]:
 class Upscaler:
     """Real-ESRGAN x4, loaded once."""
 
-    def __init__(self, weights: Path):
+    def __init__(self, weights: Path, device: str = "auto"):
         import torch  # imported here so --list works without it
 
         from rrdbnet import RRDBNet
 
         self.torch = torch
+        # The weights are read to the CPU and the model is then moved, which
+        # works whichever device it ends up on.
         state = torch.load(weights, map_location="cpu")
         state = state.get("params_ema", state.get("params", state))
         self.net = RRDBNet()
@@ -124,14 +126,32 @@ class Upscaler:
         self.net.load_state_dict(state, strict=True)
         self.net.eval()
 
+        # A GPU turns hours into minutes, and this ran on the CPU whatever the
+        # machine had: the model was never moved off it. Worth saying which
+        # device is in use, because a torch installed without CUDA support
+        # reports no GPU at all and the only visible symptom is that it takes
+        # all afternoon.
+        if device == "auto":
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = torch.device(device)
+        self.net.to(self.device)
+        if self.device.type == "cuda":
+            print("upscaling on %s" % torch.cuda.get_device_name(self.device))
+        else:
+            print("upscaling on the CPU -- expect minutes per hundred textures.")
+            if not torch.cuda.is_available():
+                print("  torch reports no CUDA device. If this machine has one, the installed")
+                print("  torch is the CPU build; see https://pytorch.org/get-started/locally/")
+
     def __call__(self, image: Image.Image) -> Image.Image:
         torch = self.torch
         rgba = image.convert("RGBA")
         rgb = np.asarray(rgba.convert("RGB"), dtype=np.float32) / 255.0
-        tensor = torch.from_numpy(rgb).permute(2, 0, 1).unsqueeze(0)
+        tensor = torch.from_numpy(rgb).permute(2, 0, 1).unsqueeze(0).to(self.device)
         with torch.no_grad():
             out = self.net(tensor)
-        out = out.squeeze(0).permute(1, 2, 0).clamp(0.0, 1.0).numpy()
+        # Back to the host before numpy sees it: a CUDA tensor has no .numpy().
+        out = out.squeeze(0).permute(1, 2, 0).clamp(0.0, 1.0).cpu().numpy()
         result = Image.fromarray((out * 255.0 + 0.5).astype(np.uint8), "RGB")
 
         alpha = rgba.getchannel("A")
@@ -148,6 +168,8 @@ def main() -> int:
     parser.add_argument("dump", type=Path, help="the folder the game wrote its dump into")
     parser.add_argument("out", type=Path, help="the textures folder the pack is read from")
     parser.add_argument("--weights", type=Path, default=Path("RealESRGAN_x4plus.pth"))
+    parser.add_argument("--device", default="auto",
+                        help="auto (a GPU when there is one), cuda, or cpu")
     parser.add_argument("--list", action="store_true",
                         help="classify everything and report, writing nothing")
     parser.add_argument("--all", action="store_true",
@@ -196,7 +218,7 @@ def main() -> int:
             continue
 
         if upscaler is None:
-            upscaler = Upscaler(args.weights)
+            upscaler = Upscaler(args.weights, args.device)
         try:
             result = upscaler(image)
         except Exception as error:

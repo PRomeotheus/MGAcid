@@ -39,26 +39,28 @@ compiled there. It compiles in the cloud against real Dear ImGui headers and
 stub SDL/Vulkan ones, and the shaders all pass glslangValidator, but **the MSVC
 build of the renderer has never run.** That is section 1.
 
-## 1. Build
+## 1. Build -- done, and it links
+
+`MGAcid.exe` builds under MSVC. All nine shaders are embedded, `dof.frag` and
+`reflect.frag` among them, and both data-free test suites pass.
+
+Two things broke on the way and are fixed, both of a kind the cloud check
+cannot see:
+
+- `mga_state_tests` failed to link. `kernel.cpp` asks fast loading whether time
+  may run ahead, and the real answer lives in a file that target does not
+  link. `-fsyntax-only` cannot see a definition missing from another
+  translation unit, so that whole class of error was invisible until a real
+  linker ran.
+- `mga_colour_lut_tests` segfaulted. Its scratch file was hardcoded to `/tmp`,
+  which does not exist on Windows, so every load failed and every check then
+  indexed an empty vector. It had been passing on Linux while testing nothing.
+
+Worth running the rest once, since they all build now and none needs game data:
 
 ```
-cmake -S . -B out/mga -DPSPRECOMP_PROFILE=mga
-cmake --build out/mga
+ctest --test-dir out/mga --output-on-failure
 ```
-
-This is the step that has not happened anywhere. Eighteen-odd changes went into
-`vulkan_renderer.cpp` alone, and it grew by 1,506 lines. If something does not
-compile, it is here.
-
-Then the two tests that need no game data:
-
-```
-ctest --test-dir out/mga -R "colour_lut|fast_loading" --output-on-failure
-```
-
-Both pass on this machine already, under GCC 11 -- but under MSVC they have not
-run, and `colour_lut.cpp` uses `std::from_chars` for floats, which is the one
-thing in it most likely to differ between compilers.
 
 ## 2. First run: nothing on
 

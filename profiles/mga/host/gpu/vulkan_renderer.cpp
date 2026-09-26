@@ -4293,7 +4293,11 @@ VulkanRenderer::Impl::Texture &VulkanRenderer::Impl::texture_for(const GuestMemo
     const bool pack_in_use = (texture_pack.dumping() || texture_pack_enabled) && !rewritten_in_place;
     const std::uint64_t pack_key = pack_in_use ? content_key(width, height, pixels.data()) : 0u;
     if (pack_in_use) texture_pack.dump(pack_key, width, height, pixels.data());
-    const PackedTexture *replacement = texture_pack_enabled ? texture_pack.find(pack_key) : nullptr;
+    // pack_in_use, not texture_pack_enabled: without it a rewritten texture --
+    // whose key was deliberately not computed and is therefore 0 -- looks up
+    // key 0, which is a wasted miss now and would apply one file to every
+    // dynamic texture in the game if 0000000000000000.png ever existed.
+    const PackedTexture *replacement = pack_in_use && texture_pack_enabled ? texture_pack.find(pack_key) : nullptr;
     if (replacement != nullptr) {
         // Someone has drawn this at a resolution of their choosing, so the
         // renderer's own upscaling has no business enlarging it further.

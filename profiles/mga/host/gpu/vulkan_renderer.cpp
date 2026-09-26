@@ -1359,6 +1359,19 @@ struct VulkanRenderer::Impl {
     bool quit{};
     bool ready{};
     std::uint64_t frames{};
+    // Guest addresses whose texture missed the cache on a recent frame, and
+    // how many are currently being treated that way.
+    //
+    // texture_key() mixes the guest address on purpose, so that a texture the
+    // game rewrites in place is seen as a new texture rather than a stale one.
+    // The consequence is that such a texture misses on EVERY frame, and
+    // everything on the miss path is then paid for on every frame. For decode
+    // that is unavoidable. For upscaling it is close to pointless: what gets
+    // rewritten each frame is generated content -- dialogue text, a composed
+    // still -- and enlarging it costs a full rescale and a fresh upload at N
+    // times the area, forever, for a picture that is about to be thrown away.
+    std::map<std::uint32_t, std::uint64_t> rewritten_addresses;
+    std::size_t rewritten_count{};
     std::uint64_t draws{};
 
     // Only the first pad is used; a second one arriving is ignored rather than
@@ -4216,6 +4229,33 @@ VulkanRenderer::Impl::Texture &VulkanRenderer::Impl::texture_for(const GuestMemo
         retired_textures.push_back(oldest->second);
         textures.erase(oldest);
     }
+    // Is this address one the game keeps rewriting? Missing again within a
+    // frame or two of the last miss is the signal, and it is the only one
+    // available: nothing in a display list says a texture is dynamic.
+    //
+    // A static texture evicted under memory pressure can be caught by this and
+    // go un-enlarged for a few frames. That is the right way round to be
+    // wrong -- a texture that is not upscaled, briefly, against a rescale of
+    // every frame forever -- and it corrects itself as soon as the misses stop.
+    constexpr std::uint64_t kRewrittenWindow = 2u;
+    bool rewritten_in_place = false;
+    {
+        const auto [seen, fresh] = rewritten_addresses.try_emplace(state.address, frames);
+        if (!fresh) {
+            rewritten_in_place = frames - seen->second <= kRewrittenWindow;
+            seen->second = frames;
+        }
+        // Bounded: forget anything that has not missed in a while, rather than
+        // growing a map with an entry for every texture the game ever drew.
+        if (rewritten_addresses.size() > 4096u) {
+            for (auto it = rewritten_addresses.begin(); it != rewritten_addresses.end();)
+                it = frames - it->second > 240u ? rewritten_addresses.erase(it) : std::next(it);
+        }
+        rewritten_count = 0u;
+        for (const auto &[address, last] : rewritten_addresses)
+            if (frames - last <= kRewrittenWindow) ++rewritten_count;
+    }
+
     // All of this happens once per texture, behind the same cache as the
     // decode, so a texture the game reuses every frame is paid for on its
     // first use.
@@ -4247,7 +4287,10 @@ VulkanRenderer::Impl::Texture &VulkanRenderer::Impl::texture_for(const GuestMemo
     // texture_key() mixes the guest address exactly so that it does -- so the
     // cost lands hardest on dialogue text and composed stills, which are the
     // frames that can least afford it.
-    const bool pack_in_use = texture_pack.dumping() || texture_pack_enabled;
+    // Dumping one of these would write a new PNG every frame for the same
+    // window, and no pack entry will ever match a picture the game composes
+    // fresh, so the lookup is wasted too.
+    const bool pack_in_use = (texture_pack.dumping() || texture_pack_enabled) && !rewritten_in_place;
     const std::uint64_t pack_key = pack_in_use ? content_key(width, height, pixels.data()) : 0u;
     if (pack_in_use) texture_pack.dump(pack_key, width, height, pixels.data());
     const PackedTexture *replacement = texture_pack_enabled ? texture_pack.find(pack_key) : nullptr;
@@ -4257,7 +4300,7 @@ VulkanRenderer::Impl::Texture &VulkanRenderer::Impl::texture_for(const GuestMemo
         pixels = replacement->pixels;
         width = replacement->width;
         height = replacement->height;
-    } else if (texture_scale > 1u) {
+    } else if (texture_scale > 1u && !rewritten_in_place) {
         (void)scale_texture(pixels, width, height, texture_scale,
                             texture_scale_sharp ? TextureScaleMode::Sharp : TextureScaleMode::Smooth);
     }
@@ -4929,6 +4972,10 @@ std::string VulkanRenderer::video_memory_report() const {
         << static_cast<double>(impl.texture_budget) / kMegabyte << " MB in " << impl.textures.size()
         << ", targets " << static_cast<double>(impl.target_bytes) / kMegabyte << "/"
         << static_cast<double>(impl.target_budget) / kMegabyte << " MB in " << impl.targets.size();
+    // Textures the game is rewriting in place this moment, which are the ones
+    // skipping the upscale. Reported because a silent optimisation that
+    // sometimes declines to enlarge a texture is worse than a visible one.
+    if (impl.rewritten_count != 0u) out << ", rewritten " << impl.rewritten_count;
     return out.str();
 }
 

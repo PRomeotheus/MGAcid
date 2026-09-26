@@ -4236,9 +4236,20 @@ VulkanRenderer::Impl::Texture &VulkanRenderer::Impl::texture_for(const GuestMemo
     // appearance and tools/qar.py can name a file the same way without the
     // game having run.
     //
-    // One pass over the texels, on the miss that decoded them, not per draw.
-    const std::uint64_t pack_key = content_key(width, height, pixels.data());
-    texture_pack.dump(pack_key, width, height, pixels.data());
+    // One pass over the texels, on the miss that decoded them, not per draw --
+    // and only when something is going to use the number.
+    //
+    // It was computed unconditionally at first, which was wrong in a way worth
+    // naming. dump() returns immediately unless dumping is on, and find() is
+    // not called unless a pack is loaded, so with neither of those the hash was
+    // a full pass over every texel of every miss for a value nothing read. A
+    // texture the game rewrites in place misses on every frame by design --
+    // texture_key() mixes the guest address exactly so that it does -- so the
+    // cost lands hardest on dialogue text and composed stills, which are the
+    // frames that can least afford it.
+    const bool pack_in_use = texture_pack.dumping() || texture_pack_enabled;
+    const std::uint64_t pack_key = pack_in_use ? content_key(width, height, pixels.data()) : 0u;
+    if (pack_in_use) texture_pack.dump(pack_key, width, height, pixels.data());
     const PackedTexture *replacement = texture_pack_enabled ? texture_pack.find(pack_key) : nullptr;
     if (replacement != nullptr) {
         // Someone has drawn this at a resolution of their choosing, so the

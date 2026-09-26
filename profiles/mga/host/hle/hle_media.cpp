@@ -485,8 +485,23 @@ bool should_present(DisplayState &display, std::uint32_t previous_framebuffer) {
     // This is self-limiting: the flag is set by draw_over_game(), which runs
     // from the present it causes, and clears itself the first time that finds
     // nothing to draw.
-    const bool interface_up = ui::overlay_drawn();
-    if (!display.drawn_since_present && !cpu_frame && !idle && !interface_up) return false;
+    //
+    // But it needs a rate of its own, and the first version had none. This
+    // function is called from sceDisplaySetFrameBuf, and the trace says the
+    // game calls that 150 to 180 times a second while it sits at a menu --
+    // two or three times per vblank. Returning true on every one of them asked
+    // for 180 presents a second against a 60 Hz screen, and with FIFO present
+    // each of those blocks the emulation thread against vsync. So the dialog
+    // stopped blinking and the music started skipping instead, which is the
+    // same mistake twice: the flag said whether to present and never how often.
+    //
+    // 16 ms is the screen's own rate. Faster asks for images that cannot be
+    // shown and blocks the thread to find that out.
+    constexpr auto kInterfacePresent = std::chrono::milliseconds(16);
+    const bool interface_due = ui::overlay_drawn() &&
+                               (display.last_present == Clock::time_point{} ||
+                                now - display.last_present >= kInterfacePresent);
+    if (!display.drawn_since_present && !cpu_frame && !idle && !interface_due) return false;
     display.presented = display.framebuffer;
     display.drawn_since_present = false;
     display.last_present = now;

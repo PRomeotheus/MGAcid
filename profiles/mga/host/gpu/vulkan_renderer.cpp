@@ -1919,18 +1919,25 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
         std::cout << "[render] ambient occlusion falls back to the post pass: " << error << "\n";
         error.clear();
     }
-    // Shares that pass's render pass, so it can only be built once that one is,
-    // and a failure here is not fatal either: the shafts simply stay off.
-    // Optional, like the shafts: without it the game runs, only without the
-    // background going soft.
+    // Depth of field and floor reflections, which share the occlusion pass's
+    // render pass and its fullscreen vertex shader, so they can only be built
+    // once that one is. Neither failure is fatal: the effect stays off.
+    //
+    // Only the pipelines here. The half-size image they read is created much
+    // further down, because making it needs a command buffer to put it into
+    // its first layout, and the command pool does not exist yet at this point.
+    // That ordering is not a detail: calling it here passed a null command
+    // pool to vkAllocateCommandBuffers, which is undefined and crashed the
+    // driver on every launch.
     std::string dof_error;
-    if (!impl.create_dof_pipeline(dof_error)) std::cout << "[render] depth of field unavailable: " << dof_error << "\n";
-    else if (!impl.create_blur(dof_error))
+    if (!impl.create_dof_pipeline(dof_error))
         std::cout << "[render] depth of field unavailable: " << dof_error << "\n";
     std::string reflect_error;
     if (!impl.create_reflect_pipeline(reflect_error))
         std::cout << "[render] reflections unavailable: " << reflect_error << "\n";
 
+    // Shares that pass's render pass, so it can only be built once that one is,
+    // and a failure here is not fatal either: the shafts simply stay off.
     if (!impl.create_volumetric_pipeline(error)) {
         std::cout << "[render] volumetric light unavailable: " << error << "\n";
         error.clear();
@@ -2067,6 +2074,15 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
         }
     }
     impl.bind_shadow_map();
+
+    // The half-size copy of the world that depth of field and reflections read.
+    // Here rather than beside their pipelines because create_blur needs a
+    // command buffer, and the command pool is created between the two.
+    if (impl.dof_pipeline != VK_NULL_HANDLE || impl.reflect_pipeline != VK_NULL_HANDLE) {
+        std::string blur_error;
+        if (!impl.create_blur(blur_error))
+            std::cout << "[render] depth of field and reflections unavailable: " << blur_error << "\n";
+    }
 
     // The identity table. Two entries a side is not a coarse identity, it is
     // an exact one: trilinear interpolation between the eight corners of the
@@ -3857,6 +3873,14 @@ void VulkanRenderer::Impl::destroy_target(Target &target) {
 
 // Records commands into a one-time buffer and waits for them to finish.
 void VulkanRenderer::Impl::run_commands(const std::function<void(VkCommandBuffer)> &record) {
+    // Called before the command pool exists, this would hand VK_NULL_HANDLE to
+    // vkAllocateCommandBuffers, which is undefined and dereferenced by the
+    // driver. It cost a crash on every launch to find out, so it says so now
+    // rather than dying somewhere inside the loader.
+    if (command_pool == VK_NULL_HANDLE) {
+        std::cout << "[render] run_commands before the command pool exists; skipped\n";
+        return;
+    }
     VkCommandBufferAllocateInfo command_info{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
     command_info.commandPool = command_pool;
     command_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;

@@ -299,6 +299,53 @@ bool FrameRecord::build_blend(const FrameRecord &earlier, const FrameRecord &lat
             }
         }
 
+        // Vertex colours on a draw that ADDS to what is already there.
+        //
+        // An in-between frame is meant to show where something was halfway
+        // through moving. For a draw that replaces what it covers, a halfway
+        // colour is exactly that. For one that adds -- glow, a muzzle flash,
+        // and in this game the dialogue text as it is printed -- it is not:
+        // the extra image contributes its own light on top, so a colour caught
+        // halfway between two frames puts light on the screen that neither
+        // real frame had. Text being printed changes colour as each character
+        // arrives, so it flickers brighter while it writes and settles when it
+        // stops, which is exactly what was reported.
+        //
+        // Held at the newer frame's value for the same reason the texture
+        // coordinates are: this frame is carried forward from the newest real
+        // frame rather than sitting between two.
+        //
+        // Only where the colours actually differ, so a static glow -- the
+        // common case by far -- is untouched and costs one comparison.
+        // "Adds" means equation ADD with a destination factor of one. The
+        // encoding is the GE's, and it is not the obvious one: to_blend_factor()
+        // in vulkan_renderer.cpp maps 1 to ONE_MINUS_SRC_COLOR, not to one. One
+        // is 16 -- or a fixed colour, 10, whose RGB is white, which is how this
+        // game usually asks for additive blending. I had this wrong first time
+        // and the test would have fired on the wrong draws entirely.
+        //
+        // These two constants live in vulkan_renderer.cpp as well. They cannot
+        // change independently without this guard silently choosing different
+        // draws, which is the same hazard content_key() carries with qar.py.
+        constexpr std::uint32_t kFactorFixed = 10u;
+        constexpr std::uint32_t kFactorOne = 16u;
+        const auto is_one = [](std::uint32_t factor, std::uint32_t fixed) {
+            return factor == kFactorOne || (factor == kFactorFixed && (fixed & 0x00FFFFFFu) == 0x00FFFFFFu);
+        };
+        const bool accumulates = b.blend.enabled && b.blend.equation == 0u &&
+                                 is_one(b.blend.destination_factor, b.blend.fixed_destination);
+        bool hold_colour = false;
+        if (accumulates && a.vertices.size() == b.vertices.size()) {
+            ++blend_report().additive_draws;
+            for (std::size_t v = 0; v < b.vertices.size(); ++v) {
+                if (a.vertices[v].color != b.vertices[v].color) {
+                    hold_colour = true;
+                    ++blend_report().additive_held;
+                    break;
+                }
+            }
+        }
+
         DrawCall &dst = into.draws_[j];
         for (std::size_t v = 0; v < b.vertices.size(); ++v) {
             const Vertex &va = a.vertices[v];
@@ -318,7 +365,7 @@ bool FrameRecord::build_blend(const FrameRecord &earlier, const FrameRecord &lat
             // with.
             for (std::size_t c = 0; c < 2u; ++c)
                 vd.texcoord[c] = hold[c] ? vb.texcoord[c] : mix(va.texcoord[c], vb.texcoord[c], t);
-            vd.color = mix_colour(va.color, vb.color, t);
+            vd.color = hold_colour ? vb.color : mix_colour(va.color, vb.color, t);
         }
         mix_matrix(a.world, b.world, t, dst.world);
         mix_matrix(a.view, b.view, t, dst.view);

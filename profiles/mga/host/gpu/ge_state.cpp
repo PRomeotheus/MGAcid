@@ -374,11 +374,17 @@ void GeState::handle_command(const GuestMemory &memory, std::uint32_t command, s
     }
     // MGA_TRACE_LIGHTING does the same for the registers around that run
     // that lighting and fog may live in: the enables after 0x17, 0x50..0x52,
-    // 0x5D..0x9A and 0xC8..0xD0. Each value is also shown as a 24-bit float,
+    // 0x50..0x9A and 0xC8..0xD0. Each value is also shown as a 24-bit float,
     // since several of them carry one.
+    //
+    // The range used to be 0x50..0x52 and 0x5D..0x9A, which left out the whole
+    // material block and, worse, kAmbientColor at 0x5C -- the global ambient,
+    // which is the one register that would explain a whole scene coming out
+    // darker than it should. Chasing exactly that, the trace was silent about
+    // the register most likely to hold the answer.
     if (static const bool trace = std::getenv("MGA_TRACE_LIGHTING") != nullptr;
-        trace && ((command >= 0x18u && command <= 0x20u) || (command >= 0x50u && command <= 0x52u) ||
-                  (command >= 0x5Du && command <= 0x9Au) || (command >= 0xC8u && command <= 0xD0u))) {
+        trace && ((command >= 0x18u && command <= 0x20u) || (command >= 0x50u && command <= 0x9Au) ||
+                  (command >= 0xC8u && command <= 0xD0u))) {
         static std::map<std::uint32_t, std::map<std::uint32_t, std::uint64_t>> seen;
         auto &values = seen[command];
         if (++values[data] == 1u && values.size() <= 16u)

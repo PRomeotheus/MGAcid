@@ -150,6 +150,10 @@ public:
         std::size_t screen_draws{};
         std::size_t screen_moving{};
         double screen_max{};
+        // Draws whose vertex colours were held rather than mixed, and how many
+        // accumulating draws were looked at. See the note in build_blend.
+        std::size_t additive_draws{};
+        std::size_t additive_held{};
         // Texture coordinate axes held rather than blended, and how many were
         // looked at. Zero held over a session means the game has no flipbook
         // and the guard is costing nothing.

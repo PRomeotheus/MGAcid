@@ -252,7 +252,12 @@ void report_display_trace() {
             std::cout << " | uv axes " << static_cast<double>(blend.flipbook_axes) / seconds << ", held "
                       << 100.0 * static_cast<double>(blend.flipbook_held) / static_cast<double>(blend.flipbook_axes)
                       << "%";
+        if (blend.additive_draws != 0u)
+            std::cout << " | adding draws " << static_cast<double>(blend.additive_draws) / seconds << ", colour held "
+                      << 100.0 * static_cast<double>(blend.additive_held) / static_cast<double>(blend.additive_draws)
+                      << "%";
         blend.flipbook_axes = blend.flipbook_held = 0u;
+        blend.additive_draws = blend.additive_held = 0u;
     }
     std::cout << "\n";
     trace.set_frame_buf = trace.set_immediate = trace.address_changed = trace.vblank_waits = 0u;

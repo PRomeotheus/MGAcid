@@ -79,3 +79,7 @@ __pycache__/
 # Texture dumps: qar.py pack writes a couple of thousand PNGs here, and
 # upscale_textures.py reads them. Derived from the disc, so never committed.
 dumps/
+
+# Real-ESRGAN weights: 67 MB, someone else's, and one download.
+# The upscaler looks for them in the working directory.
+*.pth

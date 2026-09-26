@@ -76,8 +76,12 @@ out/mga/bin/MGAcid.exe > run_base.log 2>&1
   near-white bar with dark text on it.
 - Video is in sections now: Picture, Textures, Lighting, Post-processing,
   Shadows, Frame pacing.
-- There is no Font row. If one appears, this game does use sceLibFont and the
-  guess behind hiding it was wrong — worth knowing either way.
+- The Text section, with Font, Weight and the fonts folder, is still there and
+  SHOULD be. I said earlier it was a Monster Hunter leftover and that it had
+  been removed. Both were wrong: it was never removed, and removing it would
+  have been a mistake. profiles/mga/host/hle/hle_font.cpp implements sceLibFont
+  for this game, and every run prints "Fonts: game text from MS Gothic" — the
+  game's own text really is drawn through that setting.
 - Play a battle. **Anything that looks different here is a regression**, since
   nothing new is switched on.
 

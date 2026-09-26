@@ -282,11 +282,16 @@ tuning them. The measurement in section 3 decides something much larger: if
 most of a room never receives light, the deferred relight pass moves more of
 the picture than every screen-space effect in this list put together.
 
-## 7. The texture pack -- built, not yet enlarged
+## 7. The texture pack -- done
 
-`dumps/textures` already holds all 2,356, extracted from the disc in 76
-seconds with no playthrough. What is left is the enlarging, which needs a GPU
-and so needs to happen here rather than in a VM:
+Built and enlarged: 2,356 extracted from the disc in 76 seconds with no
+playthrough, then 1,349 enlarged and 1,007 left alone -- the numbers this file
+predicted. The pack is in `%APPDATA%/MGAcid/MGA/textures`. The data folder is
+that, not `%LOCALAPPDATA%/MGAcid` as an earlier version of this file said:
+organization `MGAcid`, application `MGA`, which is not a pair anyone would
+guess. Grades go beside it in `.../MGA/grades`.
+
+The command, for when it is run again:
 
 ```
 python3 profiles/common/tools/upscale_textures.py dumps/textures <data>/textures

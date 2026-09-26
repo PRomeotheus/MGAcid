@@ -114,27 +114,36 @@ Two things worth carrying forward from how this was found:
   deciding what to investigate and a bad one for deciding where to look: this
   port had pre-existing costs that nothing had happened to exercise yet.
 
-## 3. The two measurements
+## 3. The two measurements -- taken, and what they said
 
-These decide what is worth doing next, so take them before changing settings.
+Both are done. Recorded here because they change what is worth doing next.
 
-```
-MGA_TRACE_SHADOWS=1 out/mga/bin/MGAcid.exe > lit.log 2>&1
-```
+**The flipbook guard is free.** `uv axes 28,182 per second, held 0%`, steady
+across the whole session. This game has no flipbook, the threshold never fires,
+and `MGA_NO_FLIPBOOK_GUARD` is not needed. Closed.
 
-Play into a room and look at the `lit` against `transformed` counts. If lit
-draws are a small fraction, most of a room never receives light at all, and
-that is the ceiling on every lighting feature below — no shader work moves it,
-and the deferred relighting pass becomes the only thing that would.
+**Lighting reaches a minority of the picture.** `transformed=217 lit=62` in one
+room and `transformed=486 lit=232` in another: between 26% and 48% of drawn
+geometry receives light at all. So section 4 is worth doing and will not touch
+half to three quarters of what is on screen. That is the ceiling I said to look
+for, and it is real without being total.
 
-```
-MGA_TRACE_DISPLAY=1 out/mga/bin/MGAcid.exe > display.log 2>&1
-```
+**The game sets up no usable light.** This was not what the measurement was
+for, and it is the more interesting result. Every `[shadow]` line reports
+`light=0 worldfixed=1` with a direction of about `(0.32, 0.91, 0.25)` -- almost
+straight up, which is shadow_map.cpp's own fallback for a light it could not
+resolve. Two things follow:
 
-The line now ends with `uv axes N, held X%`. **Zero held** means this game has
-no flipbook and the guard costs nothing. A high percentage means my threshold
-is wrong for this game, not that the game is full of flipbooks —
-`MGA_NO_FLIPBOOK_GUARD=1` turns it off.
+- Light shafts will draw, but from an invented overhead light rather than from
+  anything the game asked for. If they look arbitrary, that is why, and it is
+  not a bug in the pass.
+- The floor reflections assume +Y is up. This confirms it independently, from
+  a different piece of code than the one I reasoned from.
+
+Taken together: shader work on the lit fraction has a hard limit here, and the
+deferred relight pass -- giving the unlit majority a light at all -- is the
+thing that would move the most picture. That is the standing recommendation
+whatever section 4 turns up.
 
 ## 4. One at a time, in this order
 

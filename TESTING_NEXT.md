@@ -85,6 +85,35 @@ out/mga/bin/MGAcid.exe > run_base.log 2>&1
 - Play a battle. **Anything that looks different here is a regression**, since
   nothing new is switched on.
 
+## 2b. What the first run actually found
+
+Recorded because it is a property of the port worth knowing, not a one-off.
+
+**Texture scaling and textures the game rewrites in place.** A still-image
+cutscene with a dialogue window ran at 7 to 15 frames a second with audio
+skipping, while 3D gameplay held a steady 60. The cause was Texture scale, and
+it is not new: texture_key() mixes the guest address on purpose, so a texture
+rewritten in place is seen as a new texture and misses the cache on every
+frame. Everything on the miss path is then paid every frame, and at 4x that is
+a two-megapixel rescale plus an eight-megabyte upload, per frame, for a picture
+about to be overwritten. Steady geometry uploads once and hits forever, which
+is why only the cutscene showed it.
+
+Such an address is now detected -- a miss again within two frames of its last
+miss -- and skips the upscale, the pack dump and the pack lookup. The count
+appears in the video memory line as `rewritten N`.
+
+Two things worth carrying forward from how this was found:
+
+- Frame smoothing was MASKING it. With smoothing on it read as 25-32 fps; with
+  smoothing off, 7-15. Turning a feature off and watching the number get worse
+  means the feature was compensating, not causing. I read that as inconclusive
+  when it was already decisive.
+- I assumed a regression and searched my own changes for three rounds before
+  Pablo found it. "Anything different here is a regression" is a good rule for
+  deciding what to investigate and a bad one for deciding where to look: this
+  port had pre-existing costs that nothing had happened to exercise yet.
+
 ## 3. The two measurements
 
 These decide what is worth doing next, so take them before changing settings.

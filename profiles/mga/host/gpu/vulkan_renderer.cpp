@@ -6724,7 +6724,15 @@ void VulkanRenderer::present(std::uint32_t display_address) {
                                   : 0.0f)
                           << " centre=(" << impl.shadow_map->box_centre()[0] << ", "
                           << impl.shadow_map->box_centre()[1] << ", " << impl.shadow_map->box_centre()[2] << ")"
-                          << " map=" << impl.shadow_map->resolution();
+                          << " map=" << impl.shadow_map->resolution()
+                          // The blobs run off a separate caster list, published
+                          // by the game-state side rather than gathered from
+                          // draws, so they fail for their own reasons and need
+                          // their own counters.
+                          << "\n[shadow] blobs drawn=" << impl.blob_frames
+                          << " nocasters=" << impl.blob_no_casters
+                          << " notransform=" << impl.blob_no_transform
+                          << " strength=" << impl.blob_strength;
             }
             std::cout << std::endl;
         }

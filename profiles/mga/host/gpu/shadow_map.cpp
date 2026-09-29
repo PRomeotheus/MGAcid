@@ -549,10 +549,22 @@ bool ShadowMap::resolve_light(const LightingState &lighting, const std::array<fl
     const std::array<float, 16> projection = orthographic(half, half, 1.0f, distance + half * 3.0f);
     capture_transform_ = multiply(projection, view);
     light_direction_ = to_light;
-    // Kept as it is, including -1: the renderer passes it to the shader, which
-    // reads a negative index as "no light of the game's own", and shadows lit
-    // geometry by darkening it the way it does unlit geometry.
-    capture_light_ = chosen;
+    // -1 whenever the direction is the port's own sun, and not only when the
+    // game had no light to offer.
+    //
+    // The shader uses this index to decide how to shadow LIT geometry: it
+    // subtracts that light's own diffuse and specular contribution, which is
+    // the right thing to do when the shadow was cast from that light. It was
+    // not. world_fixed_ means the direction above came from kSunDirection, so
+    // subtracting the game's light 0 removes a term that has nothing to do
+    // with where the shadow fell -- and since that term is near zero on most
+    // of this game's geometry, what it removed was nothing at all. The result
+    // was characters that took no visible shadow while the debug overlay,
+    // which ignores the index, painted them red perfectly well.
+    //
+    // A negative index tells the shader there is no such term, so it darkens
+    // lit geometry the way it already darkens the baked scenery.
+    capture_light_ = world_fixed_ ? -1 : chosen;
     capture_has_light_ = true;
     return true;
 }

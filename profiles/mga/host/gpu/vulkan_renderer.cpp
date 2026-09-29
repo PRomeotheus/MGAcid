@@ -915,7 +915,11 @@ struct VulkanRenderer::Impl {
     // the renderer's own to recover world space, which is what keeps the sun
     // pointing the same way whichever way the camera turns.
     std::array<float, 16> shadow_transform{};
-    bool shadow_transform_valid{};
+    // Whether the kernel is looking at the game world at all, as opposed to a
+    // menu, a map screen or a load. Two things are switched off when it is
+    // not: shadows, which would otherwise be cast by the last real frame's
+    // light box, and the field-of-view control. See both uses below.
+    bool in_game_scene{};
     // Enough of the last transformed draw to reach the same space again: the
     // scene's matrices, its viewport and the target it went to. Copying the
     // whole DrawCall every draw would mean copying its vertices with it.
@@ -5181,7 +5185,7 @@ void VulkanRenderer::set_shadow_maps(float strength) {
 void VulkanRenderer::set_world_transform(const std::array<float, 16> &world_to_clip, bool valid) {
     Impl &impl = *impl_;
     if (!impl.ready) return;
-    impl.shadow_transform_valid = valid;
+    impl.in_game_scene = valid;
     if (valid) impl.shadow_transform = world_to_clip;
 }
 
@@ -5916,13 +5920,13 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     // Any transformed draw will do to settle the light: the lighting registers
     // are the same for the whole frame, and waiting for a lit one meant no
     // shadows at all in a scene that draws its world unlit.
-    // shadow_transform_valid is the test for "this is the game world and not a
+    // in_game_scene is the test for "this is the game world and not a
     // menu". Without it the map screen and the load screen are shadowed by
     // whatever the last real frame left in the light's box -- geometry that
     // lands inside it by coincidence comes out with a dark smear across it
     // that belongs to a scene that is not on the screen any more.
     if (!call.through && !call.clear_mode && impl.shadow_available && impl.shadow_map != nullptr &&
-        impl.shadow_strength > 0.0f && impl.shadow_transform_valid && !impl.shadow_casting) {
+        impl.shadow_strength > 0.0f && impl.in_game_scene && !impl.shadow_casting) {
         impl.last_lighting = call.lighting;
         impl.last_lighting_valid = true;
         // The renderer's projection times view takes a pre-transformed vertex
@@ -5931,7 +5935,7 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
         // world instead of in a space that turns with the camera.
         impl.shadow_trace.resolved =
             impl.shadow_map->resolve_light(call.lighting, multiply(call.projection, call.view),
-                                           impl.shadow_transform, impl.shadow_transform_valid);
+                                           impl.shadow_transform, impl.in_game_scene);
         if (impl.shadow_trace.resolved) {
             impl.shadow_light_transform = impl.shadow_map->transform();
             impl.shadow_light = impl.shadow_map->light_index();
@@ -6129,8 +6133,16 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     // interface over it. So the widening stops at that seam. MGA_FOV_EVERYWHERE
     // restores the old behaviour, which is worth having if some scene turns out
     // to go back to drawing the world after the interface has started.
+    // ...and not on a screen that is not the game world.
+    //
+    // A wider field of view shows more of the world than the artist put
+    // geometry in. In a room that does not matter, because the room continues
+    // past the edge of the frame. On the map screen the backdrop is one finite
+    // piece of geometry with nothing behind it, so widening the view slides
+    // its edge into frame and what is beyond it is a black wedge -- one that
+    // changes shape as the camera turns, because the edge turns with it.
     static const bool fov_everywhere = std::getenv("MGA_FOV_EVERYWHERE") != nullptr;
-    const bool widen = !impl.hud_started || fov_everywhere;
+    const bool widen = (!impl.hud_started && impl.in_game_scene) || fov_everywhere;
     push.transform =
         multiply(widen ? widen_field_of_view(call.projection, impl.field_of_view) : call.projection, view_world);
     push.viewport = {static_cast<float>(kPspWidth), static_cast<float>(kPspHeight), call.through ? 1.0f : 0.0f,

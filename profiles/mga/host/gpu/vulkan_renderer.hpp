@@ -207,10 +207,12 @@ public:
     // pointing the same way whichever way the camera turns. Call once a frame;
     // the renderer keeps it until replaced.
     // `valid` is false when the kernel is not looking at a scene at all --
-    // a menu, a map screen, a load. Shadows are switched off for those: the
-    // light's box still holds the last real frame's casters, and menu geometry
-    // that happens to land inside it gets shadowed by a scene that is not on
-    // the screen any more.
+    // a menu, a map screen, a load. Two things are switched off for those.
+    // Shadows, because the light's box still holds the last real frame's
+    // casters and menu geometry landing inside it gets shadowed by a scene
+    // that is not on the screen any more. And the field-of-view control,
+    // because a menu backdrop is a finite piece of geometry and widening the
+    // view slides its edge into frame with nothing behind it.
     void set_world_transform(const std::array<float, 16> &world_to_clip, bool valid);
     void set_perf_overlay(bool visible);
 

@@ -1370,7 +1370,11 @@ struct VulkanRenderer::Impl {
     // rewritten each frame is generated content -- dialogue text, a composed
     // still -- and enlarging it costs a full rescale and a fresh upload at N
     // times the area, forever, for a picture that is about to be thrown away.
-    std::map<std::uint32_t, std::uint64_t> rewritten_addresses;
+    struct AddressMemo {
+        std::uint64_t key{};    // the cache key this address last produced
+        std::uint64_t frame{};  // and when
+    };
+    std::map<std::uint32_t, AddressMemo> rewritten_addresses;
     std::size_t rewritten_count{};
     std::uint64_t draws{};
 
@@ -4240,20 +4244,34 @@ VulkanRenderer::Impl::Texture &VulkanRenderer::Impl::texture_for(const GuestMemo
     constexpr std::uint64_t kRewrittenWindow = 2u;
     bool rewritten_in_place = false;
     {
-        const auto [seen, fresh] = rewritten_addresses.try_emplace(state.address, frames);
+        const auto [seen, fresh] = rewritten_addresses.try_emplace(state.address, AddressMemo{key, frames});
         if (!fresh) {
-            rewritten_in_place = frames - seen->second <= kRewrittenWindow;
-            seen->second = frames;
+            // The key is the answer, not the timing. texture_key() mixes the
+            // texture's bytes, so a DIFFERENT key at the same address means the
+            // game wrote new pixels there -- a genuine rewrite. The SAME key
+            // missing again means the cache threw it away and is about to
+            // decode identical pixels: an eviction, not a rewrite.
+            //
+            // The first version tested only "missed again within two frames",
+            // which cannot tell those apart. The cache runs at its 1024-entry
+            // cap all the time, so static textures are evicted constantly, and
+            // every one of them was being read as rewritten -- skipping its
+            // upscale and its pack replacement for a few frames and then
+            // getting them back. That is the texture flicker while the camera
+            // pans, and it got worse once a pack was loaded, because a 2048
+            // replacement fills the cache faster than the art it replaces.
+            rewritten_in_place = seen->second.key != key && frames - seen->second.frame <= kRewrittenWindow;
+            seen->second = {key, frames};
         }
         // Bounded: forget anything that has not missed in a while, rather than
         // growing a map with an entry for every texture the game ever drew.
         if (rewritten_addresses.size() > 4096u) {
             for (auto it = rewritten_addresses.begin(); it != rewritten_addresses.end();)
-                it = frames - it->second > 240u ? rewritten_addresses.erase(it) : std::next(it);
+                it = frames - it->second.frame > 240u ? rewritten_addresses.erase(it) : std::next(it);
         }
         rewritten_count = 0u;
-        for (const auto &[address, last] : rewritten_addresses)
-            if (frames - last <= kRewrittenWindow) ++rewritten_count;
+        for (const auto &[address, memo] : rewritten_addresses)
+            if (frames - memo.frame <= kRewrittenWindow) ++rewritten_count;
     }
 
     // All of this happens once per texture, behind the same cache as the
@@ -4293,11 +4311,7 @@ VulkanRenderer::Impl::Texture &VulkanRenderer::Impl::texture_for(const GuestMemo
     const bool pack_in_use = (texture_pack.dumping() || texture_pack_enabled) && !rewritten_in_place;
     const std::uint64_t pack_key = pack_in_use ? content_key(width, height, pixels.data()) : 0u;
     if (pack_in_use) texture_pack.dump(pack_key, width, height, pixels.data());
-    // pack_in_use, not texture_pack_enabled: without it a rewritten texture --
-    // whose key was deliberately not computed and is therefore 0 -- looks up
-    // key 0, which is a wasted miss now and would apply one file to every
-    // dynamic texture in the game if 0000000000000000.png ever existed.
-    const PackedTexture *replacement = pack_in_use && texture_pack_enabled ? texture_pack.find(pack_key) : nullptr;
+    const PackedTexture *replacement = texture_pack_enabled ? texture_pack.find(pack_key) : nullptr;
     if (replacement != nullptr) {
         // Someone has drawn this at a resolution of their choosing, so the
         // renderer's own upscaling has no business enlarging it further.

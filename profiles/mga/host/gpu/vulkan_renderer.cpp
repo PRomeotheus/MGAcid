@@ -890,6 +890,12 @@ struct VulkanRenderer::Impl {
     // Draw space to the casting light's clip space, and which light that is.
     std::array<float, 16> shadow_light_transform{};
     int shadow_light{-1};
+    // Whether a light was settled this frame, kept apart from which light it
+    // was. The two used to be the same test, and that was wrong: -1 is a
+    // legitimate answer meaning "the port's own sun, not one of the game's",
+    // and reading it as "no shadow" switched shadows off in exactly the case
+    // they were most needed.
+    bool shadow_casting{};
     // The lighting the last lit draw used, which the casting light is chosen
     // out of.
     LightingState last_lighting{};
@@ -5438,6 +5444,7 @@ void VulkanRenderer::begin_frame() {
     impl.forget_bindings();
     impl.shadow_recorded = false;
     impl.shadow_light = -1;
+    impl.shadow_casting = false;
     if (impl.shadow_available) {
         vkResetCommandBuffer(impl.shadow_command_buffer, 0u);
         VkCommandBufferBeginInfo shadow_begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -5939,7 +5946,7 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     // are the same for the whole frame, and waiting for a lit one meant no
     // shadows at all in a scene that draws its world unlit.
     if (!call.through && !call.clear_mode && impl.shadow_available && impl.shadow_map != nullptr &&
-        impl.shadow_strength > 0.0f && impl.shadow_light < 0) {
+        impl.shadow_strength > 0.0f && !impl.shadow_casting) {
         impl.last_lighting = call.lighting;
         impl.last_lighting_valid = true;
         // The renderer's projection times view takes a pre-transformed vertex
@@ -5952,6 +5959,7 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
         if (impl.shadow_trace.resolved) {
             impl.shadow_light_transform = impl.shadow_map->transform();
             impl.shadow_light = impl.shadow_map->light_index();
+            impl.shadow_casting = true;
         }
     }
     const auto view_world = multiply(call.view, call.world);
@@ -5965,7 +5973,7 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     // shadowing on for geometry that was never in the light's map, which is
     // dark blotches drifting over the scenery.
     const bool needs_environment =
-        lit || fogged || (impl.shadow_light >= 0 && impl.shadow_strength > 0.0f && !call.through && !call.clear_mode);
+        lit || fogged || (impl.shadow_casting && impl.shadow_strength > 0.0f && !call.through && !call.clear_mode);
     if (needs_environment && impl.environment_version != call.environment_version) {
         const LightingState &state = call.lighting;
         EnvironmentBlock environment{};
@@ -5976,7 +5984,7 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
         // the shadow red instead of darkening, so it cannot be missed.
         static const bool shadow_debug = std::getenv("MGA_SHADOW_DEBUG") != nullptr;
         environment.shadow_transform = impl.shadow_light_transform;
-        const bool casting = impl.shadow_light >= 0 && impl.shadow_strength > 0.0f;
+        const bool casting = impl.shadow_casting && impl.shadow_strength > 0.0f;
         environment.shadow_shape = {kShadowSoftness, kShadowMaxRadiusTexels, 0.0f, 0.0f};
         environment.tonemap = {impl.tonemap_curve, 0.0f, 0.0f, 0.0f};
         // Relief is worked out inside the per-fragment light loop, so it can
@@ -6034,6 +6042,12 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
                                           ? std::array<float, 4>{diffuse[0] / peak, diffuse[1] / peak,
                                                                  diffuse[2] / peak, 0.0f}
                                           : std::array<float, 4>{1.0f, 1.0f, 1.0f, 0.0f};
+        } else {
+            // No light of the game's own behind the shadow, so the shafts take
+            // the colour of the port's own sun, which is white. Set rather
+            // than left alone: this survives between frames, and a tint from
+            // some earlier scene is not this scene's answer.
+            impl.shadow_light_color = {1.0f, 1.0f, 1.0f, 0.0f};
         }
         impl.environment_version = call.environment_version;
     }
@@ -6043,7 +6057,7 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     // the lit ones -- otherwise an unlit draw would read whichever world matrix
     // the last lit draw happened to leave there.
     const bool needs_object =
-        lit || (impl.shadow_light >= 0 && impl.shadow_strength > 0.0f && !call.through && !call.clear_mode);
+        lit || (impl.shadow_casting && impl.shadow_strength > 0.0f && !call.through && !call.clear_mode);
     if (needs_object) {
         const LightingState &state = call.lighting;
         if (impl.material_version != call.material_version) {
@@ -6700,7 +6714,8 @@ void VulkanRenderer::present(std::uint32_t display_address) {
                       << " strength=" << std::fixed << std::setprecision(2) << impl.shadow_strength
                       << " | transformed=" << s.transformed << " lit=" << s.lit << " identity=" << s.identity
                       << " both=" << s.identity_lit << " casterverts=" << s.casters
-                      << " | resolved=" << (s.resolved ? 1 : 0) << " light=" << impl.shadow_light
+                      << " | resolved=" << (s.resolved ? 1 : 0) << " casting=" << (impl.shadow_casting ? 1 : 0)
+                      << " light=" << impl.shadow_light
                       << " worldfixed=" << (impl.shadow_map != nullptr && impl.shadow_map->light_is_world_fixed() ? 1 : 0);
             if (impl.shadow_light >= 0 && impl.last_lighting_valid) {
                 const LightState &light = impl.last_lighting.lights[static_cast<std::size_t>(impl.shadow_light)];

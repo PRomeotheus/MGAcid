@@ -1350,6 +1350,16 @@ struct VulkanRenderer::Impl {
     std::uint64_t texture_clock{};
     // texture_key results for the display list being walked, by the state that
     // feeds the key; cleared by begin_display_list().
+    //
+    // Every field read_clut() uses belongs here, and shift, mask and offset
+    // were missing. They are how one index image becomes several pictures:
+    // the entry is ((index >> shift) & mask) | offset << 4, so offset picks a
+    // sixteen-entry block of the palette, and a game that wants a lit panel
+    // and an unlit one stores the indices once and moves the offset. Left out
+    // of this memo, two such draws in the same list shared a key, and the
+    // cache answered the second with the first one's picture -- one surface
+    // showing two different images, swapping about as the cache evicted and
+    // re-decoded it.
     struct TextureKeyInput {
         std::uint32_t address{};
         std::uint32_t buffer_width{};
@@ -1357,6 +1367,9 @@ struct VulkanRenderer::Impl {
         std::uint32_t format{};
         std::uint32_t clut_address{};
         std::uint32_t clut_format{};
+        std::uint32_t clut_shift{};
+        std::uint32_t clut_mask{};
+        std::uint32_t clut_offset{};
         bool swizzled{};
         auto operator<=>(const TextureKeyInput &) const = default;
     };
@@ -4210,6 +4223,9 @@ VulkanRenderer::Impl::Texture &VulkanRenderer::Impl::texture_for(const GuestMemo
                                 static_cast<std::uint32_t>(state.format),
                                 state.clut_address,
                                 state.clut_format,
+                                state.clut_shift,
+                                state.clut_mask,
+                                state.clut_offset,
                                 state.swizzled};
     auto [memo, inserted] = list_texture_keys.try_emplace(input, 0u);
     if (inserted) memo->second = texture_key(memory, state);

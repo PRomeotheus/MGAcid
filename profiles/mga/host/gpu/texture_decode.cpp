@@ -310,6 +310,14 @@ std::uint64_t texture_key(const GuestMemory &memory, const TextureState &texture
     if (indexed) {
         mix(texture.clut_address);
         mix(texture.clut_format);
+        // How the palette is indexed, which is as much a part of what this
+        // texture looks like as the palette itself: offset picks a sixteen-
+        // entry block, so the same indices through offset 0 and offset 1 are
+        // two different pictures. Without these in the key they were one
+        // entry in the cache.
+        mix(texture.clut_shift);
+        mix(texture.clut_mask);
+        mix(texture.clut_offset);
     }
     const std::uint32_t bits = bits_per_texel(texture.format);
     // DXT1 blocks hold half a byte per texel, DXT3 and DXT5 blocks a byte.
@@ -349,8 +357,38 @@ std::uint64_t texture_key(const GuestMemory &memory, const TextureState &texture
             mix(memory.load32(texture.address + offset));
         }
     }
-    if (indexed && texture.clut_address != 0u && memory.contains(texture.clut_address, 4u))
-        mix(memory.load32(texture.clut_address));
+    // The palette's contents, and not just its first word.
+    //
+    // Only the first word used to go in, and for a paletted texture the
+    // palette IS most of the picture: the pixels are indices and say nothing
+    // about what colour anything is. Two textures that share index data at one
+    // address and differ only in their palette -- which is how a console game
+    // gets two versions of a panel out of one image -- came out with identical
+    // keys, so the cache returned whichever it had decoded first, with the
+    // wrong palette baked into it. On screen that is one surface showing two
+    // different pictures, swapping as the cache evicts and re-decodes it.
+    // Entry zero is very often transparent or black in both variants, which is
+    // exactly the entry the old sample looked at.
+    //
+    // Only the entries this texture can actually reach are read: read_clut()
+    // forms an entry as ((index >> shift) & mask) | offset << 4, so the
+    // largest it can produce is mask | offset << 4. The hardware's palette
+    // memory is a kilobyte, and a mask asking for more than that is malformed
+    // rather than a palette, so it is clamped. This is memoised for the
+    // display list being walked, so it is paid once per texture per list
+    // rather than once per draw.
+    if (indexed && texture.clut_address != 0u) {
+        const std::uint32_t entry_bytes = texture.clut_format == 3u ? 4u : 2u;
+        const std::uint32_t entries = (texture.clut_mask | (texture.clut_offset << 4u)) + 1u;
+        const std::uint32_t clut_bytes = std::min(entries * entry_bytes, 1024u);
+        std::uint32_t offset = 0u;
+        for (; offset + 4u <= clut_bytes; offset += 4u) {
+            if (!memory.contains(texture.clut_address + offset, 4u)) break;
+            mix(memory.load32(texture.clut_address + offset));
+        }
+        if (offset + 2u <= clut_bytes && memory.contains(texture.clut_address + offset, 2u))
+            mix(memory.load16(texture.clut_address + offset));
+    }
     return key;
 }
 

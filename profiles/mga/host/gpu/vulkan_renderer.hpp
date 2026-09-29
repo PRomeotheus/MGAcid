@@ -206,7 +206,12 @@ public:
     // in. The shadow map needs it to recover world space and keep its sun
     // pointing the same way whichever way the camera turns. Call once a frame;
     // the renderer keeps it until replaced.
-    void set_world_transform(const std::array<float, 16> &world_to_clip);
+    // `valid` is false when the kernel is not looking at a scene at all --
+    // a menu, a map screen, a load. Shadows are switched off for those: the
+    // light's box still holds the last real frame's casters, and menu geometry
+    // that happens to land inside it gets shadowed by a scene that is not on
+    // the screen any more.
+    void set_world_transform(const std::array<float, 16> &world_to_clip, bool valid);
     void set_perf_overlay(bool visible);
 
     [[nodiscard]] SDL_Window *window() const noexcept;

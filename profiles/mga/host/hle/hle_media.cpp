@@ -530,7 +530,7 @@ void publish_world_transform(Runtime &rt) {
     if (disabled) return;
     if (!media().renderer || !media().renderer->available()) return;
     const scene::View &view = scene::read(rt);
-    media().renderer->set_world_transform(view.world_to_clip);
+    media().renderer->set_world_transform(view.world_to_clip, view.valid);
 }
 #endif
 

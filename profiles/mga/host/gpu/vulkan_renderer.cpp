@@ -5162,11 +5162,11 @@ void VulkanRenderer::set_shadow_maps(float strength) {
     std::cout << "[render] cast shadows " << (wanted > 0.0f ? "on" : "off") << "\n";
 }
 
-void VulkanRenderer::set_world_transform(const std::array<float, 16> &world_to_clip) {
+void VulkanRenderer::set_world_transform(const std::array<float, 16> &world_to_clip, bool valid) {
     Impl &impl = *impl_;
     if (!impl.ready) return;
-    impl.shadow_transform = world_to_clip;
-    impl.shadow_transform_valid = true;
+    impl.shadow_transform_valid = valid;
+    if (valid) impl.shadow_transform = world_to_clip;
 }
 
 std::uint64_t VulkanRenderer::arena_peak_bytes() const noexcept {
@@ -5900,8 +5900,13 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     // Any transformed draw will do to settle the light: the lighting registers
     // are the same for the whole frame, and waiting for a lit one meant no
     // shadows at all in a scene that draws its world unlit.
+    // shadow_transform_valid is the test for "this is the game world and not a
+    // menu". Without it the map screen and the load screen are shadowed by
+    // whatever the last real frame left in the light's box -- geometry that
+    // lands inside it by coincidence comes out with a dark smear across it
+    // that belongs to a scene that is not on the screen any more.
     if (!call.through && !call.clear_mode && impl.shadow_available && impl.shadow_map != nullptr &&
-        impl.shadow_strength > 0.0f && !impl.shadow_casting) {
+        impl.shadow_strength > 0.0f && impl.shadow_transform_valid && !impl.shadow_casting) {
         impl.last_lighting = call.lighting;
         impl.last_lighting_valid = true;
         // The renderer's projection times view takes a pre-transformed vertex

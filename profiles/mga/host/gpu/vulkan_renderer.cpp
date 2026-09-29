@@ -874,7 +874,15 @@ struct VulkanRenderer::Impl {
     // movable.
     std::unique_ptr<ShadowMap> shadow_map;
     float shadow_strength{};
-    std::uint32_t shadow_resolution{1024u};
+    // 1024 was a phone-sized budget applied to a machine that is not a phone.
+    // The box has to span the level -- about 20,000 units in the scene this
+    // was measured in -- and at 1024 that is twenty world units a texel, which
+    // gives a character two or three texels and no shadow worth the name. At
+    // 4096 it is five, and the map costs 64 MB of video memory and a
+    // depth-only pass over some thirty thousand vertices, neither of which is
+    // a real cost on anything this port runs on. MGA_SHADOW_MAP_SIZE lowers it
+    // for a machine where it turns out to be one.
+    std::uint32_t shadow_resolution{4096u};
     bool shadow_available{};
     // What binding 2 of the lighting set holds, so it is rewritten only when
     // the answer changes.
@@ -2081,6 +2089,10 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
     if (!no_shadow_map) {
         std::string shadow_error;
         const ShadowMap::DeviceContext shadow_context{impl.device, impl.physical_device};
+        if (const char *size = std::getenv("MGA_SHADOW_MAP_SIZE"); size != nullptr) {
+            const unsigned long wanted = std::strtoul(size, nullptr, 10);
+            if (wanted >= 256ul && wanted <= 4096ul) impl.shadow_resolution = static_cast<std::uint32_t>(wanted);
+        }
         impl.shadow_map = std::make_unique<ShadowMap>();
         if (impl.shadow_map->create(shadow_context, impl.shadow_resolution, kShadowVertexShader,
                                     sizeof(kShadowVertexShader), shadow_error)) {
@@ -5934,19 +5946,6 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
         // to clip space; the game's own matrix takes a world position to the
         // same place. Handing both over is what lets the sun be placed in the
         // world instead of in a space that turns with the camera.
-        // The camera, so the light's box can be aimed at what it is looking at
-        // rather than fitted around every caster in the level. The inverse
-        // view holds both pieces in the space the casters arrive in -- the
-        // same space, because add_casters takes call.world and that is what
-        // call.view undoes: the eye is its translation and the third column is
-        // the axis it points along. Which way along that axis is the front is
-        // left to the shadow map, which has the ground plane to test it
-        // against. When the view will not invert, no focus is given and the
-        // box falls back to fitting the casters.
-        std::array<float, 16> eye_view{};
-        if (invert(call.view, eye_view))
-            impl.shadow_map->set_focus({eye_view[12], eye_view[13], eye_view[14]},
-                                       {eye_view[8], eye_view[9], eye_view[10]});
         impl.shadow_trace.resolved =
             impl.shadow_map->resolve_light(call.lighting, multiply(call.projection, call.view),
                                            impl.shadow_transform, impl.shadow_transform_valid);
@@ -6725,11 +6724,7 @@ void VulkanRenderer::present(std::uint32_t display_address) {
                                   : 0.0f)
                           << " centre=(" << impl.shadow_map->box_centre()[0] << ", "
                           << impl.shadow_map->box_centre()[1] << ", " << impl.shadow_map->box_centre()[2] << ")"
-                          << " aim=(" << impl.shadow_map->focus()[0] << ", " << impl.shadow_map->focus()[1]
-                          << ", " << impl.shadow_map->focus()[2] << ")"
-                          << " eye=(" << impl.shadow_map->eye()[0] << ", " << impl.shadow_map->eye()[1] << ", "
-                          << impl.shadow_map->eye()[2] << ")"
-                          << " followed=" << (impl.shadow_map->box_followed_focus() ? 1 : 0);
+                          << " map=" << impl.shadow_map->resolution();
             }
             std::cout << std::endl;
         }

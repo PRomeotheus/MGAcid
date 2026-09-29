@@ -524,71 +524,21 @@ bool ShadowMap::resolve_light(const LightingState &lighting, const std::array<fl
     // a character two or three texels of shadow, which is a smudge under the
     // feet rather than a shadow. Shadow debug showed exactly that.
     //
-    // So the box is capped, and aimed at what the camera is looking at.
-    // MGA_SHADOW_RANGE sets the cap in world units, and 0 restores fitting to
-    // the casters.
+    // It is sized to hold every caster, and it stays that way.
     //
-    // Where the camera IS turned out to be the wrong thing to aim at, twice
-    // over, and the trace is what settled it. The camera sits about 8,000
-    // units above the characters and 5,000 or more to one side, so a box
-    // centred on the eye contained no floor at all -- in 38 traced frames out
-    // of 57 the entire caster set fell outside it and nothing cast. Sliding
-    // that box to the nearest face of the caster bounds, one axis at a time,
-    // was better but still guesses: the nearest corner of a bounding box is
-    // not where anybody is standing, so the shadow came and went as the camera
-    // turned and the bounds changed shape.
-    //
-    // What the camera is LOOKING at is neither of those, and in a third-person
-    // game it is the player's feet. So the aim point is the camera's forward
-    // ray dropped onto the plane the casters are standing on, and the box is
-    // centred there. The casters' own midpoint gives the height of that plane;
-    // capping the box vertically would buy nothing anyway, because the sun is
-    // nearly overhead and the vertical axis is the one the light looks along.
-    //
-    // The aim point is then clamped so the box cannot leave the caster bounds
-    // altogether, which covers the cases this reasoning does not: a camera
-    // pointing at the sky, a cut, a scene with no floor under the view.
+    // Two attempts were made to shrink it -- centring it on the camera, then
+    // aiming it at what the camera was looking at -- both to win back texels,
+    // and both cost shadows. A box that only sometimes contains a character is
+    // worse than a coarse one that always does, because a shadow that blinks
+    // reads as a bug while a soft one reads as a shadow. The resolution
+    // problem is real but it belongs to the map's size, not to the box's:
+    // this is a PSP game, and texels are the cheap thing here.
     const std::array<float, 3> extent{previous_maximum_[0] - previous_minimum_[0],
                                       previous_maximum_[1] - previous_minimum_[1],
                                       previous_maximum_[2] - previous_minimum_[2]};
     const float span = std::max({extent[0], extent[1], extent[2], 1000.0f});
-    float half = span * 0.9f + 1200.0f;
-    std::array<float, 3> box_centre = centre;
-    static const float range = [] {
-        const char *text = std::getenv("MGA_SHADOW_RANGE");
-        if (text == nullptr) return 4000.0f;
-        const float value = std::strtof(text, nullptr);
-        return value >= 0.0f ? value : 4000.0f;
-    }();
-    followed_focus_ = false;
-    focus_ = centre;
-    if (has_focus_ && range > 0.0f && half > range) {
-        // Where the camera's line of sight meets the casters' own height.
-        //
-        // Which end of the view axis the game calls forward does not matter: a
-        // line meets a plane at one point whichever way you walk along it, and
-        // the camera is above the floor looking down at it, so that point is
-        // what is being looked at either way.
-        //
-        // What does matter is the camera being tilted enough to meet the floor
-        // at all. A level camera meets it at the horizon, and a distance is
-        // capped rather than trusted there.
-        const float slope = eye_forward_[1];
-        const float travel = std::abs(slope) > 1e-4f ? (centre[1] - eye_[1]) / slope : 0.0f;
-        if (std::isfinite(travel) && std::abs(travel) < 100000.0f && std::abs(slope) > 1e-4f) {
-            focus_ = {eye_[0] + eye_forward_[0] * travel, centre[1], eye_[2] + eye_forward_[2] * travel};
-            followed_focus_ = true;
-            half = range;
-            for (std::size_t axis = 0; axis < 3; ++axis) {
-                // Keep the box overlapping the casters whatever the aim point
-                // says. When they are narrower than the box on some axis these
-                // cross over, which is the signal to just hold them.
-                const float nearest = previous_minimum_[axis] + half;
-                const float furthest = previous_maximum_[axis] - half;
-                box_centre[axis] = nearest <= furthest ? std::clamp(focus_[axis], nearest, furthest) : centre[axis];
-            }
-        }
-    }
+    const float half = span * 0.9f + 1200.0f;
+    const std::array<float, 3> box_centre = centre;
     box_half_ = half;
     box_centre_ = box_centre;
     const float distance = half * 3.0f;

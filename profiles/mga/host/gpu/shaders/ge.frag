@@ -439,9 +439,17 @@ void main() {
     if (lighting.shadow_params.x > 0.0 && frag_shadow_position.w > 0.0) {
         float blocked = (1.0 - shadow_reach()) * clamp(lighting.shadow_params.x, 0.0, 1.0);
         if (lighting.shadow_params.z < 0.0) {
-            // MGA_SHADOW_DEBUG: paint it red, so a shadow that is working but
-            // too subtle to notice cannot be mistaken for one that is not.
-            color.rgb = mix(color.rgb, vec3(1.0, 0.0, 0.0), blocked);
+            // MGA_SHADOW_DEBUG: paint it, so a shadow that is working but too
+            // subtle to notice cannot be mistaken for one that is not.
+            //
+            // Two colours, because "the lookup works but nothing darkens" was
+            // not one question but two, and one overlay colour could not tell
+            // them apart. RED is geometry that gets darkened outright. BLUE is
+            // geometry that has the blocked light taken off it instead, which
+            // is the path that does nothing when there is no light term to
+            // take -- and on this game's baked scenery there usually is not.
+            vec3 mark = frag_shadow_darken > 0.5 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 0.35, 1.0);
+            color.rgb = mix(color.rgb, mark, blocked);
         } else if (frag_shadow_darken > 0.5) {
             // Baked lighting: no term to remove, so the surface is darkened
             // instead. Not to black -- nothing here says how much of its colour
@@ -458,7 +466,27 @@ void main() {
             float darken = 1.0 - blocked * 0.55;
             color.rgb *= hdr ? pow(darken, 2.2) : darken;
         } else {
-            color.rgb = max(color.rgb - blocked_light * blocked, vec3(0.0));
+            // Taking away the light that is blocked is the honest thing to do
+            // when there IS a light term, because it darkens by exactly what
+            // the shadow costs and leaves everything else lighting the surface
+            // as before. What it cannot do is darken by that amount when the
+            // amount is zero, and a term can be zero here for reasons that
+            // have nothing to do with the surface being in the open: a light
+            // the game left switched off, a material that takes no diffuse, a
+            // draw whose lighting was worked out at its corners and arrived
+            // already finished. The result is a fragment that is in shadow by
+            // every measure this shader has and comes out unchanged.
+            //
+            // So both answers are worked out and the darker one is kept. Where
+            // there is a real light term to remove it is usually the deeper of
+            // the two and nothing changes; where there is none, the flat
+            // darkening stands in for it. Taking the minimum rather than
+            // choosing a branch keeps this continuous, so there is no seam
+            // across the place where one term fades out.
+            vec3 subtracted = max(color.rgb - blocked_light * blocked, vec3(0.0));
+            float floor_darken = 1.0 - blocked * 0.55;
+            vec3 darkened = color.rgb * (hdr ? pow(floor_darken, 2.2) : floor_darken);
+            color.rgb = min(subtracted, darkened);
         }
     }
     if (push.texture_params.x > 0.5) {

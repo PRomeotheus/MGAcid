@@ -542,11 +542,13 @@ bool ShadowMap::resolve_light(const LightingState &lighting, const std::array<fl
         const float value = std::strtof(text, nullptr);
         return value >= 0.0f ? value : 4000.0f;
     }();
-    if (has_focus_ && range > 0.0f && half > range) {
+    followed_focus_ = has_focus_ && range > 0.0f && half > range;
+    if (followed_focus_) {
         half = range;
         box_centre = focus_;
     }
     box_half_ = half;
+    box_centre_ = box_centre;
     const float distance = half * 3.0f;
     const std::array<float, 3> eye{box_centre[0] + to_light[0] * distance, box_centre[1] + to_light[1] * distance,
                                   box_centre[2] + to_light[2] * distance};

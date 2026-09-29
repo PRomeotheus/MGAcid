@@ -6717,7 +6717,12 @@ void VulkanRenderer::present(std::uint32_t display_address) {
                           << (impl.shadow_map->resolution() != 0u
                                   ? 2.0f * impl.shadow_map->box_half() /
                                         static_cast<float>(impl.shadow_map->resolution())
-                                  : 0.0f);
+                                  : 0.0f)
+                          << " centre=(" << impl.shadow_map->box_centre()[0] << ", "
+                          << impl.shadow_map->box_centre()[1] << ", " << impl.shadow_map->box_centre()[2] << ")"
+                          << " focus=(" << impl.shadow_map->focus()[0] << ", " << impl.shadow_map->focus()[1]
+                          << ", " << impl.shadow_map->focus()[2] << ")"
+                          << " followed=" << (impl.shadow_map->box_followed_focus() ? 1 : 0);
             }
             std::cout << std::endl;
         }

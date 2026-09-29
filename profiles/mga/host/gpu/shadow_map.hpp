@@ -108,6 +108,12 @@ public:
     // The half-width the box settled on, for the trace: it is what decides how
     // many texels a character gets.
     [[nodiscard]] float box_half() const noexcept { return box_half_; }
+    // What the box was actually centred on, and whether that was the focus or
+    // the casters. Traced, because a focus in the wrong space is the one way
+    // this can fail that looks exactly like the light being wrong.
+    [[nodiscard]] const std::array<float, 3> &box_centre() const noexcept { return box_centre_; }
+    [[nodiscard]] bool box_followed_focus() const noexcept { return followed_focus_; }
+    [[nodiscard]] const std::array<float, 3> &focus() const noexcept { return focus_; }
 
     [[nodiscard]] const std::array<float, 3> &box_minimum() const noexcept { return previous_minimum_; }
     [[nodiscard]] const std::array<float, 3> &box_maximum() const noexcept { return previous_maximum_; }
@@ -185,6 +191,8 @@ private:
     std::array<float, 3> focus_{};
     bool has_focus_{};
     float box_half_{};
+    std::array<float, 3> box_centre_{};
+    bool followed_focus_{};
     std::array<float, 3> previous_minimum_{};
     std::array<float, 3> previous_maximum_{};
     bool previous_valid_{};

@@ -916,9 +916,19 @@ struct VulkanRenderer::Impl {
     // pointing the same way whichever way the camera turns.
     std::array<float, 16> shadow_transform{};
     // Whether the kernel is looking at the game world at all, as opposed to a
-    // menu, a map screen or a load. Two things are switched off when it is
-    // not: shadows, which would otherwise be cast by the last real frame's
-    // light box, and the field-of-view control. See both uses below.
+    // menu, a map screen or a load.
+    //
+    // Everything this port adds to how the world looks is switched off when it
+    // is not: shadows, which would otherwise be cast by the last real frame's
+    // light box; the field-of-view control, which slides a menu backdrop's own
+    // edge into frame; and the lighting model, below.
+    //
+    // The map screen is the case that makes the rule. It is drawn from 3D
+    // geometry, so every one of these applies to it, but it is an interface:
+    // its colours were chosen flat and are meant to arrive on screen as they
+    // were authored. Per-pixel lighting and linear shading are improvements to
+    // a lit room and they have nothing to improve here -- all they do is make
+    // the map darker than it was drawn to be.
     bool in_game_scene{};
     // Enough of the last transformed draw to reach the same space again: the
     // scene's matrices, its viewport and the target it went to. Copying the
@@ -5185,6 +5195,12 @@ void VulkanRenderer::set_shadow_maps(float strength) {
 void VulkanRenderer::set_world_transform(const std::array<float, 16> &world_to_clip, bool valid) {
     Impl &impl = *impl_;
     if (!impl.ready) return;
+    // The environment block carries terms that depend on this, and it is only
+    // rewritten when the game's own version counter moves. A change here is
+    // not one of those, so the block is marked unwritten and the next draw
+    // writes it: otherwise entering or leaving a menu keeps the old lighting
+    // until the game happens to touch a lighting register.
+    if (impl.in_game_scene != valid) impl.environment_version = 0u;
     impl.in_game_scene = valid;
     if (valid) impl.shadow_transform = world_to_clip;
 }
@@ -5969,7 +5985,11 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
         environment.tonemap = {impl.tonemap_curve, 0.0f, 0.0f, 0.0f};
         // Relief is worked out inside the per-fragment light loop, so it can
         // only do anything when that loop is the one running.
-        environment.surface = {impl.light_per_pixel ? impl.surface_relief : 0.0f, 0.0f, 0.0f, 0.0f};
+        // See in_game_scene: the lighting model is for the world, not for an
+        // interface drawn out of 3D geometry.
+        const bool per_pixel = impl.light_per_pixel && impl.in_game_scene;
+        const bool linear = impl.linear_light && impl.in_game_scene;
+        environment.surface = {per_pixel ? impl.surface_relief : 0.0f, 0.0f, 0.0f, 0.0f};
         // The eye in world space: the translation of the inverse view matrix.
         // When the game hands over a view that cannot be inverted -- which it
         // does during some transitions -- the shader falls back to the GE's own
@@ -5980,8 +6000,8 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
             environment.camera = {inverse_view[12], inverse_view[13], inverse_view[14], 1.0f};
         else
             environment.camera = {0.0f, 0.0f, 0.0f, 0.0f};
-        environment.shading = {impl.linear_light ? impl.light_intensity : 1.0f, impl.ambient_shape,
-                               impl.linear_light ? impl.dither : 0.0f, impl.fresnel};
+        environment.shading = {linear ? impl.light_intensity : 1.0f, impl.ambient_shape,
+                               linear ? impl.dither : 0.0f, impl.fresnel};
         // A negative index means the direction was inferred rather than taken
         // from one of the game's lights. Clamping it to 0 pointed the shader at
         // light 0, which may be switched off: the lit path then found no light to
@@ -6147,9 +6167,9 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
         multiply(widen ? widen_field_of_view(call.projection, impl.field_of_view) : call.projection, view_world);
     push.viewport = {static_cast<float>(kPspWidth), static_cast<float>(kPspHeight), call.through ? 1.0f : 0.0f,
                      (fogged ? kPushFog : 0.0f) + (lit ? kPushLighting : 0.0f) +
-                         (impl.light_per_pixel ? kPushLightPerPixel : 0.0f) +
-                         (impl.linear_light ? kPushLinearLight : 0.0f) +
-                         (impl.accurate_specular ? kPushAccurateSpecular : 0.0f)};
+                         (impl.light_per_pixel && impl.in_game_scene ? kPushLightPerPixel : 0.0f) +
+                         (impl.linear_light && impl.in_game_scene ? kPushLinearLight : 0.0f) +
+                         (impl.accurate_specular && impl.in_game_scene ? kPushAccurateSpecular : 0.0f)};
     push.view_z = {view_world[2], view_world[6], view_world[10], view_world[14]};
     // Bit 4 asks the shader to snap texture coordinates to texel centres,
     // which turns the smooth sampler into a sharp one for this draw alone.

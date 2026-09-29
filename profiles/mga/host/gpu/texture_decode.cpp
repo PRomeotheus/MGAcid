@@ -379,8 +379,21 @@ std::uint64_t texture_key(const GuestMemory &memory, const TextureState &texture
     // rather than once per draw.
     if (indexed && texture.clut_address != 0u) {
         const std::uint32_t entry_bytes = texture.clut_format == 3u ? 4u : 2u;
-        const std::uint32_t entries = (texture.clut_mask | (texture.clut_offset << 4u)) + 1u;
-        const std::uint32_t clut_bytes = std::min(entries * entry_bytes, 1024u);
+        // The largest entry this texture can actually reach, which is
+        // read_clut()'s own formula applied to the largest index the format
+        // can hold. Bounding it by the mask alone was wrong and badly so: a
+        // sixteen-colour texture has a thirty-two byte palette, but mask and
+        // offset together can claim five hundred entries, so a kilobyte of
+        // whatever happened to follow the palette went into the key. That
+        // memory changes, so the key changed every frame, every such texture
+        // missed every frame, and the cache spent itself re-decoding things
+        // that had not changed -- which is geometry dropping out, not just
+        // textures flickering.
+        const std::uint32_t index_bits = bits_per_texel(texture.format);
+        const std::uint32_t max_index = index_bits >= 8u || index_bits == 0u ? 255u : (1u << index_bits) - 1u;
+        const std::uint32_t last_entry =
+            ((max_index >> texture.clut_shift) & texture.clut_mask) | (texture.clut_offset << 4u);
+        const std::uint32_t clut_bytes = std::min((last_entry + 1u) * entry_bytes, 1024u);
         std::uint32_t offset = 0u;
         for (; offset + 4u <= clut_bytes; offset += 4u) {
             if (!memory.contains(texture.clut_address + offset, 4u)) break;

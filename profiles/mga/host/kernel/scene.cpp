@@ -104,7 +104,7 @@ const View &read(Runtime &runtime) {
     for (const float value : view.camera)
         if (!std::isfinite(value)) return view;
 
-    // The matrix the blobs are actually drawn with. Without it there is
+    // The matrix the shadow map recovers world space with. Without it there is
     // nothing to draw into, so a scene without one is not usable.
     if (!memory.contains(kWorldToClip, 64u)) return view;
     for (std::size_t i = 0; i < 16u; ++i)

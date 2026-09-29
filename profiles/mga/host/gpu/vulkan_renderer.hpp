@@ -30,17 +30,6 @@ struct PadState {
     std::uint8_t right_y{0x80u};
 };
 
-// Something that should cast a shadow on the ground: a character, in world
-// space. The renderer cannot work these out for itself -- Metal Gear Ac!d
-// skins its characters on the CPU and submits them pre-transformed with an
-// identity world matrix, all batched at the origin -- so the kernel reads them
-// out of the game's own records and hands them over once a frame.
-struct ShadowCaster {
-    std::array<float, 3> position{};  // world space
-    float ground{};                   // world height of the floor beneath it
-    float radius{};                   // how wide the shadow should be
-};
-
 struct RendererConfig {
     std::string title{"MGAcid"};
 };
@@ -209,20 +198,15 @@ public:
     // they are allowed. A budget nothing reports is a budget nobody can tell
     // is working.
     [[nodiscard]] std::string video_memory_report() const;
-    // What the blob seam decided, counted since the game started.
-    [[nodiscard]] std::string blob_report() const;
-    // Blob shadows under the characters. 0 turns them off. Unlike the effects
-    // above this does not need the post-processing pass: the blobs are drawn
-    // with the scene, so they sit under the geometry properly.
-    void set_blob_shadows(float strength);
     // Shadows cast from the game's own lights, through a depth map rendered
     // from where the brightest light stands. 0 turns them off.
     void set_shadow_maps(float strength);
-    // The characters to put a blob under, in world space, and the matrix that
-    // takes world space to clip space -- the game's own, so the renderer needs
-    // no assumption about what space the display list is in. Call once a
-    // frame; the renderer keeps them until replaced.
-    void set_shadow_casters(const std::array<float, 16> &world_to_clip, const std::vector<ShadowCaster> &casters);
+    // The matrix that takes world space to clip space -- the game's own, so
+    // the renderer needs no assumption about what space the display list is
+    // in. The shadow map needs it to recover world space and keep its sun
+    // pointing the same way whichever way the camera turns. Call once a frame;
+    // the renderer keeps it until replaced.
+    void set_world_transform(const std::array<float, 16> &world_to_clip);
     void set_perf_overlay(bool visible);
 
     [[nodiscard]] SDL_Window *window() const noexcept;
@@ -261,10 +245,6 @@ public:
     [[nodiscard]] std::uint64_t draws_submitted() const noexcept;
 
 private:
-    // Draws a blob under each caster. Called from submit() at the moment the
-    // frame turns from 3D to the interface.
-    void draw_shadow_blobs(const GuestMemory &memory);
-
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

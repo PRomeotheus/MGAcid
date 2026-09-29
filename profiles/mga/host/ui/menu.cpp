@@ -700,23 +700,6 @@ void Menu::video() {
         }
     }
     {
-        const float levels[4] = {0.0f, 0.4f, 0.7f, 1.0f};
-        const char *names[4] = {"Off", "Subtle", "Medium", "Strong"};
-        int level = 0;
-        for (int i = 3; i > 0; --i)
-            if (s.blob_shadows >= levels[i] - 0.01f) { level = i; break; }
-        if (const int delta =
-                choice_row("Character shadows", names[level],
-                           options_for("video.blob_shadows",
-                                       "A soft shadow on the ground under each character, drawn with the scene so "
-                                       "it sits under the geometry properly. Works on its own; it does not need "
-                                       "post-processing."))) {
-            s.blob_shadows = levels[cycle(level, delta, 4)];
-            renderer().set_blob_shadows(s.blob_shadows);
-            settings::save();
-        }
-    }
-    {
         const float levels[4] = {0.0f, 0.5f, 0.75f, 1.0f};
         const char *names[4] = {"Off", "Subtle", "Medium", "Strong"};
         int level = 0;

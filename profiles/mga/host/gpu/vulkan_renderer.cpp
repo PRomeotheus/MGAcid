@@ -69,20 +69,6 @@ struct PushConstants {
 static_assert(sizeof(PushConstants) == 128u, "PushConstants must fit the guaranteed push constant size");
 constexpr float kPushFog = 1.0f;
 constexpr float kPushLighting = 2.0f;
-// This draw is itself a shadow and must not be shadowed again.
-//
-// The blob discs are the only thing that sets it. A blob lies on the ground
-// directly beneath the character that casts it, so the character is always
-// between it and the light: sampled against the shadow map the blob is always
-// blocked, and gets darkened on top of the darkening it already is. Worse, how
-// much depends on the soft-shadow penumbra, which is measured from the gap
-// between caster and receiver and therefore changes every time the character
-// moves -- so the blob does not merely come out too dark, it flickers.
-//
-// None of this was visible until cast shadows started working properly. While
-// the blobs were dragging the light's box out to tens of thousands of units
-// there was no cast shadow to speak of, so there was nothing to darken them.
-constexpr float kPushNoShadow = 4.0f;
 // Evaluate the lights per fragment rather than per vertex. The terms are the
 // GE's own either way; this only moves where they are worked out.
 constexpr float kPushLightPerPixel = 8.0f;
@@ -427,7 +413,7 @@ VkBlendFactor to_blend_factor(std::uint32_t factor, bool source) {
 VkBlendOp to_blend_op(std::uint32_t equation) {
     switch (equation) {
     // GU_SUBTRACT is source minus destination; GU_REVERSE_SUBTRACT is the other
-    // way round, and it is what darkening effects such as blob shadows use.
+    // way round, and it is what darkening effects use.
     case 1u: return VK_BLEND_OP_SUBTRACT;
     case 2u: return VK_BLEND_OP_REVERSE_SUBTRACT;
     case 3u: return VK_BLEND_OP_MIN;
@@ -866,7 +852,6 @@ struct VulkanRenderer::Impl {
     float post_bloom{};
     // Blob shadows. The casters come from the kernel, which reads them out of
     // the game's records; the renderer only draws them.
-    float blob_strength{};
     // Shadow maps cast from the game's own lights; gpu/shadow_map.hpp explains
     // how the spaces line up and why the map is a frame behind.
     // Behind a pointer because Impl is move-assigned when the renderer shuts
@@ -912,18 +897,14 @@ struct VulkanRenderer::Impl {
         bool resolved{};               // a light was found and a box built
     };
     ShadowTrace shadow_trace{};
-    // The game's own world-to-clip matrix. Drawing the blobs with it means the
-    // port never has to decide what space the display list is in.
+    // The game's own world-to-clip matrix. The shadow map compares it against
+    // the renderer's own to recover world space, which is what keeps the sun
+    // pointing the same way whichever way the camera turns.
     std::array<float, 16> shadow_transform{};
     bool shadow_transform_valid{};
-    std::vector<ShadowCaster> shadow_casters;
-    bool blobs_drawn{};
-    // Set while the blob discs go through submit(), so the caster gate can tell
-    // them from the geometry they stand in for.
-    bool drawing_blobs{};
-    // Enough of the last transformed draw to put a blob into the same space:
-    // the scene's matrices, its viewport and the target it went to. Copying
-    // the whole DrawCall every draw would mean copying its vertices with it.
+    // Enough of the last transformed draw to reach the same space again: the
+    // scene's matrices, its viewport and the target it went to. Copying the
+    // whole DrawCall every draw would mean copying its vertices with it.
     struct SceneView {
         bool valid{};
         std::array<float, 16> view{};
@@ -1230,7 +1211,7 @@ struct VulkanRenderer::Impl {
     // matrix carries rotation only and the camera's position is baked into
     // each world matrix, so a world matrix's translation is the object's
     // position in the space the scene is actually drawn in -- which is the
-    // space a blob shadow would have to be placed in too.
+    // space anything the port draws into the scene has to be placed in too.
     struct FrameObject {
         std::array<float, 3> at{};
         std::uint32_t vertices{};
@@ -1269,13 +1250,6 @@ struct VulkanRenderer::Impl {
     // reported with the rest of the frame's numbers.
     VkDeviceSize peak_vertex_offset{};
     std::uint64_t dropped_draws{};
-    // What the blob seam decided. A blob that is simply not drawn on some
-    // frames looks exactly like a blob that is drawn wrongly, and the two want
-    // opposite fixes, so the seam counts which happened rather than leaving it
-    // to be inferred from the screen.
-    std::uint64_t blob_frames{};       // the seam was reached and blobs were drawn
-    std::uint64_t blob_no_casters{};   // reached, but the scene offered no characters
-    std::uint64_t blob_no_transform{}; // reached, but no world-to-clip had been published
     void note_drop(const char *where) {
         ++dropped_draws;
         static bool reported = false;
@@ -1649,7 +1623,6 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
     if (const char *steps = std::getenv("MGA_REFLECT_STEPS"))
         impl.reflect_steps = static_cast<std::uint32_t>(std::clamp(std::atoi(steps), 4, 48));
     impl.post_bloom = std::clamp(player.bloom, 0.0f, 1.0f);
-    impl.blob_strength = std::clamp(player.blob_shadows, 0.0f, 1.0f);
     impl.shadow_strength = std::clamp(player.shadow_maps, 0.0f, 1.0f);
     impl.texture_pack_enabled = player.texture_pack;
     try {
@@ -5165,22 +5138,11 @@ void VulkanRenderer::set_shadow_maps(float strength) {
     std::cout << "[render] cast shadows " << (wanted > 0.0f ? "on" : "off") << "\n";
 }
 
-void VulkanRenderer::set_blob_shadows(float strength) {
-    Impl &impl = *impl_;
-    if (!impl.ready) return;
-    const float wanted = std::clamp(strength, 0.0f, 1.0f);
-    if (impl.blob_strength == wanted) return;
-    impl.blob_strength = wanted;
-    std::cout << "[render] character shadows " << (wanted > 0.0f ? "on" : "off") << "\n";
-}
-
-void VulkanRenderer::set_shadow_casters(const std::array<float, 16> &world_to_clip,
-                                        const std::vector<ShadowCaster> &casters) {
+void VulkanRenderer::set_world_transform(const std::array<float, 16> &world_to_clip) {
     Impl &impl = *impl_;
     if (!impl.ready) return;
     impl.shadow_transform = world_to_clip;
     impl.shadow_transform_valid = true;
-    impl.shadow_casters = casters;
 }
 
 std::uint64_t VulkanRenderer::arena_peak_bytes() const noexcept {
@@ -5191,12 +5153,6 @@ std::uint64_t VulkanRenderer::dropped_draws() const noexcept {
     return impl_ ? impl_->dropped_draws : 0u;
 }
 
-std::string VulkanRenderer::blob_report() const {
-    if (impl_ == nullptr) return {};
-    return "drawn " + std::to_string(impl_->blob_frames) + ", no casters " +
-           std::to_string(impl_->blob_no_casters) + ", no transform " +
-           std::to_string(impl_->blob_no_transform);
-}
 
 std::uint64_t VulkanRenderer::arena_bytes() const noexcept {
     return static_cast<std::uint64_t>(kVertexBufferBytes);
@@ -5530,28 +5486,6 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     if (!impl.recording) begin_frame();
     if (call.vertices.empty()) return;
 
-    // The blobs belong after the scene and before the interface. The first
-    // through-mode draw of a frame that has drawn 3D is exactly that seam:
-    // everything from here on is flat and would paint over them.
-    // frame_transformed_draws != 0 belongs in the test that decides whether this
-    // through-mode draw is the seam at all, not in the reasons below it. Moved
-    // inside, it let the first flat draw of a frame consume blobs_drawn before
-    // any 3D had been drawn -- and since the game does draw flat things early,
-    // that switched the blobs off entirely rather than measuring them.
-    if (call.through && !impl.blobs_drawn && impl.blob_strength > 0.0f && impl.frame_transformed_draws != 0u) {
-        impl.blobs_drawn = true;
-        if (!impl.shadow_transform_valid) {
-            ++impl.blob_no_transform;
-        } else if (impl.shadow_casters.empty()) {
-            ++impl.blob_no_casters;
-        } else {
-            ++impl.blob_frames;
-            impl.drawing_blobs = true;
-            draw_shadow_blobs(memory);
-            impl.drawing_blobs = false;
-        }
-    }
-
     // The world has ended and the interface has begun. See hud_started.
     if (call.through && impl.frame_transformed_draws != 0u) impl.hud_started = true;
 
@@ -5575,7 +5509,7 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     impl.scratch.clear();
     // A vertex format without a colour field leaves every vertex white, and the
     // GE supplies the colour from the material registers instead. That is where
-    // the marker over an NPC's head and the shadow blobs under characters get
+    // the marker over an NPC's head and the faint markers on the floor get
     // both their colour and the alpha that makes them faint.
     //
     // Only unlit draws, though. Lighting on means the material colour is one term
@@ -5862,16 +5796,13 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
         // MGA_SHADOW_EVERYTHING_CASTS restores the wide behaviour.
         static const bool everything_casts = std::getenv("MGA_SHADOW_EVERYTHING_CASTS") != nullptr;
         // is_identity(call.world) stands for "already in draw space, because the
-        // game skinned it on the CPU". It is a proxy, and the shadow blobs break
-        // it: they are built in world space and submitted with an identity world
-        // matrix on purpose, so they satisfy the test while violating the thing it
-        // stands for. Collected, they drag the light's bounding box out by the
-        // camera's position, and a box tens of thousands of units wide across 1024
-        // texels leaves a character two or three texels of shadow -- so switching
-        // blob shadows on would quietly destroy cast shadows.
+        // game skinned it on the CPU". It is a proxy, and anything the port
+        // draws itself in world space with an identity world matrix satisfies
+        // the test while violating what it stands for -- which is how the old
+        // blob discs, before they were removed, used to drag the light's box
+        // out by the camera's position and quietly ruin the cast shadows.
         if (impl.shadow_available && impl.shadow_map != nullptr && impl.shadow_strength > 0.0f &&
-            !impl.scratch.empty() && !call.clear_mode && !impl.drawing_blobs &&
-            (everything_casts || is_identity(call.world))) {
+            !impl.scratch.empty() && !call.clear_mode && (everything_casts || is_identity(call.world))) {
             impl.shadow_map->add_casters(&impl.scratch[0].x, impl.scratch.size(),
                                         sizeof(GpuVertex) / sizeof(float), call.world);
             impl.shadow_trace.casters = static_cast<std::uint32_t>(impl.shadow_map->captured());
@@ -6159,7 +6090,6 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
         multiply(widen ? widen_field_of_view(call.projection, impl.field_of_view) : call.projection, view_world);
     push.viewport = {static_cast<float>(kPspWidth), static_cast<float>(kPspHeight), call.through ? 1.0f : 0.0f,
                      (fogged ? kPushFog : 0.0f) + (lit ? kPushLighting : 0.0f) +
-                         (impl.drawing_blobs ? kPushNoShadow : 0.0f) +
                          (impl.light_per_pixel ? kPushLightPerPixel : 0.0f) +
                          (impl.linear_light ? kPushLinearLight : 0.0f) +
                          (impl.accurate_specular ? kPushAccurateSpecular : 0.0f)};
@@ -6353,84 +6283,6 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     vkCmdDraw(impl.command_buffer, static_cast<std::uint32_t>(impl.scratch.size()), 1u, 0u, 0u);
     impl.vertex_offset += bytes;
     ++impl.draws;
-}
-
-void VulkanRenderer::draw_shadow_blobs(const GuestMemory &memory) {
-    Impl &impl = *impl_;
-    if (!impl.last_scene.valid || !impl.shadow_transform_valid) return;
-
-    // A fan: one dark vertex at the centre and a ring of transparent ones, so
-    // the blob fades out towards its edge without needing a texture.
-    constexpr std::size_t kSegments = 16u;
-    // High enough off the floor not to fight it for the depth buffer, low
-    // enough to stay hidden under a step or a crate.
-    constexpr float kLift = 10.0f;
-    constexpr float kMaxAlpha = 165.0f;
-
-    const auto alpha =
-        static_cast<std::uint32_t>(std::lround(std::clamp(impl.blob_strength, 0.0f, 1.0f) * kMaxAlpha));
-    if (alpha == 0u) return;
-    // The GE's vertex colour is ABGR, so black with an alpha is the alpha
-    // alone in the top byte.
-    const std::uint32_t centre = alpha << 24u;
-    const std::uint32_t rim = 0u;
-
-    DrawCall blob{};
-    blob.primitive = PrimitiveType::Triangles;
-    blob.target = impl.last_scene.target;
-    blob.viewport = impl.last_scene.viewport;
-    // The vertices are in world space and the game's own world-to-clip matrix
-    // takes them the whole way, so the view and world matrices are the
-    // identity and the renderer's projection slot carries that matrix. This
-    // sidesteps the question of what space the display list is drawn in --
-    // which is what put the first attempt's blobs somewhere out in the scene
-    // instead of under the characters.
-    constexpr std::array<float, 16> kIdentity{1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
-                                              0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f};
-    blob.view = kIdentity;
-    blob.world = kIdentity;
-    blob.projection = impl.shadow_transform;
-    blob.has_vertex_color = true;
-    blob.lighting_enabled = false;
-    blob.culling_enabled = false;
-    blob.blend.enabled = true;
-    blob.blend.source_factor = 2u;       // source alpha
-    blob.blend.destination_factor = 3u;  // one minus source alpha
-    // Tested against the scene so a blob is hidden by anything in front of
-    // it, but never written, so it cannot occlude what comes after.
-    blob.depth = impl.last_scene.depth;
-    blob.depth.test_enabled = true;
-    blob.depth.write_enabled = false;
-    blob.environment_version = impl.last_scene.environment_version;
-    blob.material_version = impl.last_scene.material_version;
-    blob.vertices.reserve(kSegments * 3u);
-
-    for (const ShadowCaster &caster : impl.shadow_casters) {
-        const float radius = caster.radius;
-        if (!(radius > 0.0f)) continue;
-        const std::array<float, 3> at{caster.position[0], caster.ground + kLift, caster.position[2]};
-        blob.vertices.clear();
-        for (std::size_t i = 0; i < kSegments; ++i) {
-            const auto angle = [&](std::size_t step) {
-                return 6.283185307f * static_cast<float>(step % kSegments) / static_cast<float>(kSegments);
-            };
-            const float a0 = angle(i);
-            const float a1 = angle(i + 1u);
-            Vertex middle{};
-            middle.position = {at[0], at[1], at[2], 1.0f};
-            middle.color = centre;
-            Vertex first{};
-            first.position = {at[0] + std::cos(a0) * radius, at[1], at[2] + std::sin(a0) * radius, 1.0f};
-            first.color = rim;
-            Vertex second{};
-            second.position = {at[0] + std::cos(a1) * radius, at[1], at[2] + std::sin(a1) * radius, 1.0f};
-            second.color = rim;
-            blob.vertices.push_back(middle);
-            blob.vertices.push_back(first);
-            blob.vertices.push_back(second);
-        }
-        submit(blob, memory);
-    }
 }
 
 void VulkanRenderer::write_back_frame(GuestMemory &memory) {
@@ -6739,15 +6591,7 @@ void VulkanRenderer::present(std::uint32_t display_address) {
                                   : 0.0f)
                           << " centre=(" << impl.shadow_map->box_centre()[0] << ", "
                           << impl.shadow_map->box_centre()[1] << ", " << impl.shadow_map->box_centre()[2] << ")"
-                          << " map=" << impl.shadow_map->resolution()
-                          // The blobs run off a separate caster list, published
-                          // by the game-state side rather than gathered from
-                          // draws, so they fail for their own reasons and need
-                          // their own counters.
-                          << "\n[shadow] blobs drawn=" << impl.blob_frames
-                          << " nocasters=" << impl.blob_no_casters
-                          << " notransform=" << impl.blob_no_transform
-                          << " strength=" << impl.blob_strength;
+                          << " map=" << impl.shadow_map->resolution();
             }
             std::cout << std::endl;
         }
@@ -6756,7 +6600,6 @@ void VulkanRenderer::present(std::uint32_t display_address) {
     impl.peak_vertex_offset = std::max(impl.peak_vertex_offset, impl.vertex_offset);
     impl.frame_views.clear();
     impl.frame_through_draws = 0u;
-    impl.blobs_drawn = false;
     impl.frame_transformed_draws = 0u;
     impl.frame_transformed_vertices = 0u;
     impl.frame_onscreen_vertices = 0u;

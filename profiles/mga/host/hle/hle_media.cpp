@@ -236,8 +236,6 @@ void report_display_trace() {
               << (active_renderer() != nullptr ? active_renderer()->dropped_draws() : 0u) << ", record overflow "
               << frame_record().overflow() << " | "
               << (active_renderer() != nullptr ? active_renderer()->video_memory_report() : std::string())
-              << " | blobs "
-              << (active_renderer() != nullptr ? active_renderer()->blob_report() : std::string())
 #endif
               << " | cpu scale " << kernel().cpu_scale() << ", charged work "
               << static_cast<double>(kernel().last_work_us()) / 1000.0 << " ms/frame, emulated "
@@ -514,51 +512,25 @@ bool should_present(DisplayState &display, std::uint32_t previous_framebuffer) {
 }
 
 #if defined(MGA_HAS_RENDERER)
-// Hands the renderer the characters to put a shadow under, once a frame.
+// Hands the renderer the game's own world-to-clip matrix, once a frame.
 //
-// The game's own shadows are cast by the scenery; the characters have none,
-// and the renderer cannot work out where they are for itself, because they
-// are skinned on the CPU and submitted pre-transformed at the origin. The
-// game's records know, so the kernel reads them and passes them on.
-void publish_shadow_casters(Runtime &rt) {
+// The shadow map compares it against the matrix the renderer draws with, and
+// the difference is the rotation from world space into whatever space the
+// display list is in. That is what lets the sun stay pointing the same way
+// while the camera turns, instead of swinging round with it.
+//
+// This used to publish a list of characters to drop a shadow disc under as
+// well. The discs are gone -- once cast shadows worked they were a second,
+// worse shadow drawn on top of the real one -- but the matrix was never about
+// them and is still needed.
+void publish_world_transform(Runtime &rt) {
     // MGA_NO_SHADOWS stops the scene from being read at all, which is the way
     // to tell a fault in that read from one anywhere else.
     static const bool disabled = std::getenv("MGA_NO_SHADOWS") != nullptr;
     if (disabled) return;
     if (!media().renderer || !media().renderer->available()) return;
-    static std::vector<gpu::ShadowCaster> casters;
     const scene::View &view = scene::read(rt);
-    casters.clear();
-    if (view.valid) {
-        // A character's own position sits about half a cell above the surface
-        // it stands on -- at ground level the records read y ~= 985 while the
-        // floor is at 0, and a cell is 2000 units.
-        //
-        // The floor used to be taken from the character's cell instead, which
-        // held only while everyone stood on the stage's base level: a
-        // character up on a platform inside the same cell got a shadow down
-        // at the cell's base, buried inside the platform and invisible. The
-        // character's own height tracks them up and down, so it is used
-        // instead. The cost is that the animation moves the shadow with the
-        // character, by about twelve units out of two thousand.
-        //
-        // That cost turned out to be the whole of the flicker. Twelve units of
-        // animated bob around a floor the disc is otherwise flush with means the
-        // disc crosses the floor plane and back on every step: on the down beat
-        // it is behind the floor, the depth test rejects it, and it disappears
-        // for those frames. Standing still it is steady, which is why the
-        // flicker only showed up while walking.
-        //
-        // So the disc is lifted clear by more than the bob can reach. Thirty
-        // units is one and a half percent of a cell -- far too little to see as
-        // a gap under a character, and comfortably more than twelve.
-        constexpr float kFootDrop = 1000.0f;
-        constexpr float kGroundLift = 30.0f;
-        constexpr float kRadius = 620.0f;
-        for (const scene::Character &character : view.characters)
-            casters.push_back({character.position, character.position[1] - kFootDrop + kGroundLift, kRadius});
-    }
-    media().renderer->set_shadow_casters(view.world_to_clip, casters);
+    media().renderer->set_world_transform(view.world_to_clip);
 }
 #endif
 
@@ -566,7 +538,7 @@ void present_frame(Runtime &rt) {
     // Overlays are swapped between frames; re-check before drawing the next one.
     revalidate_overlays(rt);
 #if defined(MGA_HAS_RENDERER)
-    publish_shadow_casters(rt);
+    publish_world_transform(rt);
     if (!media().renderer || !media().renderer->available()) {
         frame_record().clear();
         perf::end_frame(kernel().now_us());

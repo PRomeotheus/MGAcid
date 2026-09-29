@@ -57,7 +57,6 @@ struct Settings {
     bool post_process{};               // show the frame through a shader pass rather than a plain blit
     bool fxaa{};                       // anti-alias the finished frame; needs post_process
     float contact_shadows{};           // 0 off .. 1 strongest; darkens creases from depth, drawn with the scene
-    float blob_shadows{};              // 0 off .. 1 strongest; a soft blob under each character
     float shadow_maps{};               // 0 off .. 1 strongest; shadows cast from the game's own lights
     float colour_grade{};              // 0 off .. 1 strongest; how far towards the grade; needs post_process
     // A .cube colour grading table in <data>/grades, by file name. Empty means

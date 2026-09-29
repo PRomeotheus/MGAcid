@@ -5934,14 +5934,19 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
         // to clip space; the game's own matrix takes a world position to the
         // same place. Handing both over is what lets the sun be placed in the
         // world instead of in a space that turns with the camera.
-        // Where the camera is, so the light's box can be fitted around it
-        // rather than around every caster in the level. The translation of the
-        // inverse view is the eye in the space the casters arrive in -- the
+        // The camera, so the light's box can be aimed at what it is looking at
+        // rather than fitted around every caster in the level. The inverse
+        // view holds both pieces in the space the casters arrive in -- the
         // same space, because add_casters takes call.world and that is what
-        // call.view undoes. When the view will not invert, no focus is given
-        // and the box falls back to fitting the casters.
+        // call.view undoes: the eye is its translation and the third column is
+        // the axis it points along. Which way along that axis is the front is
+        // left to the shadow map, which has the ground plane to test it
+        // against. When the view will not invert, no focus is given and the
+        // box falls back to fitting the casters.
         std::array<float, 16> eye_view{};
-        if (invert(call.view, eye_view)) impl.shadow_map->set_focus({eye_view[12], eye_view[13], eye_view[14]});
+        if (invert(call.view, eye_view))
+            impl.shadow_map->set_focus({eye_view[12], eye_view[13], eye_view[14]},
+                                       {eye_view[8], eye_view[9], eye_view[10]});
         impl.shadow_trace.resolved =
             impl.shadow_map->resolve_light(call.lighting, multiply(call.projection, call.view),
                                            impl.shadow_transform, impl.shadow_transform_valid);
@@ -6720,8 +6725,10 @@ void VulkanRenderer::present(std::uint32_t display_address) {
                                   : 0.0f)
                           << " centre=(" << impl.shadow_map->box_centre()[0] << ", "
                           << impl.shadow_map->box_centre()[1] << ", " << impl.shadow_map->box_centre()[2] << ")"
-                          << " focus=(" << impl.shadow_map->focus()[0] << ", " << impl.shadow_map->focus()[1]
+                          << " aim=(" << impl.shadow_map->focus()[0] << ", " << impl.shadow_map->focus()[1]
                           << ", " << impl.shadow_map->focus()[2] << ")"
+                          << " eye=(" << impl.shadow_map->eye()[0] << ", " << impl.shadow_map->eye()[1] << ", "
+                          << impl.shadow_map->eye()[2] << ")"
                           << " followed=" << (impl.shadow_map->box_followed_focus() ? 1 : 0);
             }
             std::cout << std::endl;

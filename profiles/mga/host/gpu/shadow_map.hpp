@@ -98,11 +98,13 @@ public:
     [[nodiscard]] std::size_t captured() const noexcept { return captured_.size(); }
     // For MGA_TRACE_SHADOWS: the extent the light's box was built around, and
     // the direction the light was taken to be in. Both in draw space.
-    // Where the camera is, in the space the casters arrive in. The light's box
-    // is fitted around this rather than around every caster; see the note in
-    // resolve_light(). Without it the behaviour is the old one.
-    void set_focus(const std::array<float, 3> &focus) noexcept {
-        focus_ = focus;
+    // The camera, in the space the casters arrive in: where it is and which
+    // way it points. The light's box is fitted around what it is looking at
+    // rather than around every caster; see the note in resolve_light().
+    // Without this the behaviour is the old one.
+    void set_focus(const std::array<float, 3> &eye, const std::array<float, 3> &forward) noexcept {
+        eye_ = eye;
+        eye_forward_ = forward;
         has_focus_ = true;
     }
     // The half-width the box settled on, for the trace: it is what decides how
@@ -114,6 +116,7 @@ public:
     [[nodiscard]] const std::array<float, 3> &box_centre() const noexcept { return box_centre_; }
     [[nodiscard]] bool box_followed_focus() const noexcept { return followed_focus_; }
     [[nodiscard]] const std::array<float, 3> &focus() const noexcept { return focus_; }
+    [[nodiscard]] const std::array<float, 3> &eye() const noexcept { return eye_; }
 
     [[nodiscard]] const std::array<float, 3> &box_minimum() const noexcept { return previous_minimum_; }
     [[nodiscard]] const std::array<float, 3> &box_maximum() const noexcept { return previous_maximum_; }
@@ -188,6 +191,8 @@ private:
     // while the previous frame's is what sizes the light's box.
     std::array<float, 3> minimum_{};
     std::array<float, 3> maximum_{};
+    std::array<float, 3> eye_{};
+    std::array<float, 3> eye_forward_{};
     std::array<float, 3> focus_{};
     bool has_focus_{};
     float box_half_{};

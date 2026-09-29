@@ -1001,6 +1001,11 @@ struct VulkanRenderer::Impl {
     // ran there -- a frame that draws 3D and flips without ever drawing a flat
     // one never reaches the seam, and falls back to the post pass.
     bool ao_seam_passed{};
+    // Set at the first two-dimensional draw that follows a transformed one,
+    // which is where the world stops and the interface begins. Unlike
+    // ao_seam_passed this is kept whether or not any screen-space effect is
+    // switched on, because the field-of-view control needs it every frame.
+    bool hud_started{};
     bool ao_in_scene{};
 
     // A half-size copy of the finished world, taken at the seam. The seam
@@ -5432,6 +5437,7 @@ void VulkanRenderer::begin_frame() {
     // Read again at present time, after the per-frame counters have been
     // cleared, so they are reset here rather than there.
     impl.ao_seam_passed = false;
+    impl.hud_started = false;
     impl.ao_in_scene = false;
     impl.recording = true;
 }
@@ -5526,6 +5532,9 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
             impl.drawing_blobs = false;
         }
     }
+
+    // The world has ended and the interface has begun. See hud_started.
+    if (call.through && impl.frame_transformed_draws != 0u) impl.hud_started = true;
 
     // The same seam, for ambient occlusion: the depth buffer here describes the
     // world and only the world, and everything from here on paints over the
@@ -6101,7 +6110,27 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     if (pipeline == VK_NULL_HANDLE) return;
 
     PushConstants push{};
-    push.transform = multiply(widen_field_of_view(call.projection, impl.field_of_view), view_world);
+    // The field of view is widened for the world and for nothing else.
+    //
+    // The orthographic test inside widen_field_of_view keeps it off anything
+    // laid out in two dimensions, which is most of the interface, but not off
+    // the parts of the interface that are drawn in perspective. The compass is
+    // one: the needle is real geometry seen through the camera's own
+    // projection, while the ring it turns inside is a flat sprite. Widen that
+    // projection and the needle swings in towards the middle of the screen
+    // while its ring stays put, so at anything above 100% the needle leaves
+    // its own dial -- which is what it was doing.
+    //
+    // Telling the two apart by the matrix does not work, because the compass
+    // is drawn through the same matrix as the room. What does tell them apart
+    // is when they are drawn: the game finishes the world, then paints the
+    // interface over it. So the widening stops at that seam. MGA_FOV_EVERYWHERE
+    // restores the old behaviour, which is worth having if some scene turns out
+    // to go back to drawing the world after the interface has started.
+    static const bool fov_everywhere = std::getenv("MGA_FOV_EVERYWHERE") != nullptr;
+    const bool widen = !impl.hud_started || fov_everywhere;
+    push.transform =
+        multiply(widen ? widen_field_of_view(call.projection, impl.field_of_view) : call.projection, view_world);
     push.viewport = {static_cast<float>(kPspWidth), static_cast<float>(kPspHeight), call.through ? 1.0f : 0.0f,
                      (fogged ? kPushFog : 0.0f) + (lit ? kPushLighting : 0.0f) +
                          (impl.drawing_blobs ? kPushNoShadow : 0.0f) +

@@ -49,7 +49,21 @@ namespace {
 constexpr std::uint32_t kPspWidth = 480u;
 constexpr std::uint32_t kPspHeight = 272u;
 constexpr VkDeviceSize kVertexBufferBytes = 16u * 1024u * 1024u;
-constexpr std::size_t kMaxCachedTextures = 1024u;
+// How many textures the cache may hold at once, over and above the memory
+// budget that also bounds it.
+//
+// 1024 was too few, and measurably so: the cache sat at the cap permanently
+// while using 340 MB of a 2674 MB budget, which means the count was throwing
+// textures away that there was plenty of room to keep. Everything evicted had
+// to be decoded, unswizzled, upscaled and uploaded again the moment it was
+// next drawn, and with a pack loaded, looked up in the pack again too. That is
+// the texture flicker while the camera pans: the scenery leaving and re-
+// entering the cache several times a second.
+//
+// 4096 is chosen so the count stops binding and the memory budget -- which is
+// the bound that actually knows what the device can hold -- is the only one
+// left. The descriptor pool below is sized from this constant, so it follows.
+constexpr std::size_t kMaxCachedTextures = 4096u;
 // Descriptor sets for sampling render targets as textures: two per target
 // (with its alpha, and with alpha forced to one for 5650 textures).
 constexpr std::size_t kMaxFramebufferTextureSets = 64u;
@@ -1309,6 +1323,10 @@ struct VulkanRenderer::Impl {
         vertex_offset = at + size;
         return true;
     }
+    // How many textures have been thrown out since the game started. See the
+    // note on kMaxCachedTextures: this is the number that says whether the
+    // entry cap is costing anything.
+    std::uint64_t texture_evictions{};
     // Textures evicted while a frame was being recorded. Destroyed at the top of
     // the next frame, once its fence says the frame that referenced them is done.
     std::vector<Texture> retired_textures;
@@ -4225,6 +4243,7 @@ VulkanRenderer::Impl::Texture &VulkanRenderer::Impl::texture_for(const GuestMemo
         //
         // begin_frame waits on the frame fence before anything else, so that is
         // where a retired texture is genuinely idle, and where it is destroyed.
+        ++texture_evictions;
         retired_bytes += oldest->second.bytes;
         retired_textures.push_back(oldest->second);
         textures.erase(oldest);
@@ -4990,6 +5009,11 @@ std::string VulkanRenderer::video_memory_report() const {
     // skipping the upscale. Reported because a silent optimisation that
     // sometimes declines to enlarge a texture is worse than a visible one.
     if (impl.rewritten_count != 0u) out << ", rewritten " << impl.rewritten_count;
+    // Evictions, because a cache at its cap and a cache with room to spare look
+    // identical from the outside and behave completely differently. A number
+    // that climbs while the camera pans is the count binding; one that stays
+    // put is the budget doing its job.
+    out << ", evicted " << impl.texture_evictions;
     return out.str();
 }
 

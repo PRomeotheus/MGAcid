@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 
@@ -514,14 +515,41 @@ bool ShadowMap::resolve_light(const LightingState &lighting, const std::array<fl
 
     // The box has to hold the casters and the ground they cast onto, so it is
     // sized from their extent with room to spare below and around.
+    //
+    // That alone is not enough here. The caster test upstream is "the world
+    // matrix is identity", which stands for "a character, skinned on the CPU",
+    // and in this game it selects about half the scene -- measured at 63,582
+    // vertices. The extent then spans the level: one traced box ran 20,000
+    // units in z. Spread across 1024 texels that is twenty units a texel, and
+    // a character two or three texels of shadow, which is a smudge under the
+    // feet rather than a shadow. Shadow debug showed exactly that.
+    //
+    // So the box is capped and fitted around the camera instead of around
+    // everything that happens to cast. A shadow is only worth resolving where
+    // it can be seen, and in a third-person game that is near the camera. What
+    // it costs is casters further away than the cap: they stop casting rather
+    // than casting something too coarse to read. MGA_SHADOW_RANGE sets it in
+    // world units, and 0 restores fitting to the casters.
     const std::array<float, 3> extent{previous_maximum_[0] - previous_minimum_[0],
                                       previous_maximum_[1] - previous_minimum_[1],
                                       previous_maximum_[2] - previous_minimum_[2]};
     const float span = std::max({extent[0], extent[1], extent[2], 1000.0f});
-    const float half = span * 0.9f + 1200.0f;
+    float half = span * 0.9f + 1200.0f;
+    std::array<float, 3> box_centre = centre;
+    static const float range = [] {
+        const char *text = std::getenv("MGA_SHADOW_RANGE");
+        if (text == nullptr) return 4000.0f;
+        const float value = std::strtof(text, nullptr);
+        return value >= 0.0f ? value : 4000.0f;
+    }();
+    if (has_focus_ && range > 0.0f && half > range) {
+        half = range;
+        box_centre = focus_;
+    }
+    box_half_ = half;
     const float distance = half * 3.0f;
-    const std::array<float, 3> eye{centre[0] + to_light[0] * distance, centre[1] + to_light[1] * distance,
-                                  centre[2] + to_light[2] * distance};
+    const std::array<float, 3> eye{box_centre[0] + to_light[0] * distance, box_centre[1] + to_light[1] * distance,
+                                  box_centre[2] + to_light[2] * distance};
     const std::array<float, 3> forward{-to_light[0], -to_light[1], -to_light[2]};
     const std::array<float, 16> view = look_along(eye, forward, {0.0f, 1.0f, 0.0f});
     const std::array<float, 16> projection = orthographic(half, half, 1.0f, distance + half * 3.0f);

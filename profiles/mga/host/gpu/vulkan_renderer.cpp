@@ -5934,6 +5934,14 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
         // to clip space; the game's own matrix takes a world position to the
         // same place. Handing both over is what lets the sun be placed in the
         // world instead of in a space that turns with the camera.
+        // Where the camera is, so the light's box can be fitted around it
+        // rather than around every caster in the level. The translation of the
+        // inverse view is the eye in the space the casters arrive in -- the
+        // same space, because add_casters takes call.world and that is what
+        // call.view undoes. When the view will not invert, no focus is given
+        // and the box falls back to fitting the casters.
+        std::array<float, 16> eye_view{};
+        if (invert(call.view, eye_view)) impl.shadow_map->set_focus({eye_view[12], eye_view[13], eye_view[14]});
         impl.shadow_trace.resolved =
             impl.shadow_map->resolve_light(call.lighting, multiply(call.projection, call.view),
                                            impl.shadow_transform, impl.shadow_transform_valid);
@@ -6700,7 +6708,16 @@ void VulkanRenderer::present(std::uint32_t display_address) {
                 const auto &dir = impl.shadow_map->light_direction();
                 std::cout << "\n[shadow] box (" << lo[0] << ", " << lo[1] << ", " << lo[2] << ") .. (" << hi[0]
                           << ", " << hi[1] << ", " << hi[2] << ")  towards light (" << dir[0] << ", " << dir[1]
-                          << ", " << dir[2] << ")";
+                          << ", " << dir[2] << ")"
+                          // What the box was actually fitted to, and how much
+                          // world each texel of the map has to cover. Units a
+                          // texel is the number that decides whether a shadow
+                          // reads as a shadow.
+                          << "\n[shadow] half=" << impl.shadow_map->box_half() << " unitspertexel="
+                          << (impl.shadow_map->resolution() != 0u
+                                  ? 2.0f * impl.shadow_map->box_half() /
+                                        static_cast<float>(impl.shadow_map->resolution())
+                                  : 0.0f);
             }
             std::cout << std::endl;
         }

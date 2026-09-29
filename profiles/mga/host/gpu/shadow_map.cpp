@@ -524,12 +524,25 @@ bool ShadowMap::resolve_light(const LightingState &lighting, const std::array<fl
     // a character two or three texels of shadow, which is a smudge under the
     // feet rather than a shadow. Shadow debug showed exactly that.
     //
-    // So the box is capped and fitted around the camera instead of around
-    // everything that happens to cast. A shadow is only worth resolving where
-    // it can be seen, and in a third-person game that is near the camera. What
-    // it costs is casters further away than the cap: they stop casting rather
-    // than casting something too coarse to read. MGA_SHADOW_RANGE sets it in
-    // world units, and 0 restores fitting to the casters.
+    // So the box is capped, and slid towards the camera. A shadow is only
+    // worth resolving where it can be seen, and in a third-person game that is
+    // near the camera. What it costs is casters further away than the cap:
+    // they stop casting rather than casting something too coarse to read.
+    // MGA_SHADOW_RANGE sets the cap in world units, and 0 restores fitting to
+    // the casters.
+    //
+    // Slid towards, not centred on. Centring the box on the camera was the
+    // first thing tried and it was wrong: the camera is the origin of this
+    // space, but it is nowhere near the casters. Traced over a minute of play,
+    // the casters sat between 4,000 and 11,000 units BELOW the camera, and how
+    // far below changed as the camera moved -- so in 38 frames out of 57 the
+    // whole caster set fell outside a cube centred on the eye and nothing was
+    // captured at all. The shadow came back only when the two happened to line
+    // up, which looked like shadows that appear when the character stops.
+    //
+    // So the centre stays inside the caster bounds and only slides within them
+    // towards the camera, per axis. Where the casters are narrower than the
+    // cap the box simply holds them, as it always did.
     const std::array<float, 3> extent{previous_maximum_[0] - previous_minimum_[0],
                                       previous_maximum_[1] - previous_minimum_[1],
                                       previous_maximum_[2] - previous_minimum_[2]};
@@ -545,7 +558,17 @@ bool ShadowMap::resolve_light(const LightingState &lighting, const std::array<fl
     followed_focus_ = has_focus_ && range > 0.0f && half > range;
     if (followed_focus_) {
         half = range;
-        box_centre = focus_;
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            // The furthest the centre can go either way and still leave the
+            // box inside the casters on this axis. When the casters are
+            // narrower than the box these cross over, which is the signal to
+            // leave the centre where it was and just hold them.
+            const float nearest = previous_minimum_[axis] + half;
+            const float furthest = previous_maximum_[axis] - half;
+            box_centre[axis] = nearest <= furthest
+                                   ? std::clamp(focus_[axis], nearest, furthest)
+                                   : centre[axis];
+        }
     }
     box_half_ = half;
     box_centre_ = box_centre;

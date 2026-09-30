@@ -76,11 +76,20 @@ expected_executable_sha256="$(sed -n '/kExecutableSha256/,/;/p' "$game_identity"
     fail "cannot read kExecutableSha256 from $game_identity"
 
 # The FFmpeg the build bundles, as pinned in cmake/FFmpeg.cmake.
+#
+# Read once with carriage returns stripped. FFmpeg.cmake is stored with CRLF,
+# and both extractions below are defeated by a trailing \r: the version match
+# anchors on ")$", which never matches ")\r", and the flags are joined with tr,
+# which would carry the \r into the middle of the string. Neither fails
+# loudly -- the version comes back empty and the build stops with "cannot read
+# the FFmpeg pins", naming the file as though it were malformed.
 ffmpeg_cmake="$profile_dir/cmake/FFmpeg.cmake"
-cmake_value() { sed -n "s/^set($1 \(.*\))\$/\1/p" "$ffmpeg_cmake" | head -1; }
+ffmpeg_cmake_text="$(tr -d '\r' < "$ffmpeg_cmake")"
+cmake_value() { printf '%s\n' "$ffmpeg_cmake_text" | sed -n "s/^set($1 \(.*\))\$/\1/p" | head -1; }
 FFMPEG_VERSION="$(cmake_value MGA_FFMPEG_VERSION)"
 FFMPEG_URL="https://ffmpeg.org/releases/ffmpeg-$FFMPEG_VERSION.tar.xz"
-FFMPEG_FLAGS="$(sed -n '/^set(MGA_FFMPEG_CONFIGURE_FLAGS/,/)/p' "$ffmpeg_cmake" |
+FFMPEG_FLAGS="$(printf '%s\n' "$ffmpeg_cmake_text" |
+    sed -n '/^set(MGA_FFMPEG_CONFIGURE_FLAGS/,/)/p' |
     sed 's/^set(MGA_FFMPEG_CONFIGURE_FLAGS//; s/)$//' | tr -s ' \n' ' ' | sed 's/^ //; s/ $//')"
 [[ -n "$FFMPEG_VERSION" && -n "$FFMPEG_FLAGS" ]] || fail "cannot read the FFmpeg pins from $ffmpeg_cmake"
 grep -qF "\"$FFMPEG_URL\"" "$ffmpeg_cmake" ||

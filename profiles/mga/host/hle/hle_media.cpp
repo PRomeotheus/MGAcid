@@ -1126,18 +1126,45 @@ void register_audio(HleRegistrar &hle) {
         });
     }
     // Reverb is not modelled, so the sends are accepted and dropped -- but
-    // what the game ASKED for is reported the first time it asks.
+    // what the game ASKS for is reported, because whether modelling the SPU's
+    // reverb is worth days of work turns entirely on whether this game uses
+    // it, and dropping the calls in silence is exactly what stops anyone
+    // finding out.
     //
-    // Whether modelling the SPU's reverb is worth days of work turns entirely
-    // on whether this game uses it, and dropping the calls in silence is
-    // exactly what stops anyone finding out. A stealth game set in corridors
-    // and stairwells very likely does; if these lines never appear, it does
-    // not, and the whole question closes for the price of one run.
-    for (const char *name : {"__sceSasRevType", "__sceSasRevParam", "__sceSasRevEVOL", "__sceSasRevVON"}) {
-        const std::string key = std::string("rev-") + name;
-        hle.add("sceSasCore", name, [key](Runtime &, AllegrexContext &ctx) {
-            log_once(key, "[sas] " + key.substr(4) + "(" + std::to_string(arg(ctx, 1)) + ", " +
-                              std::to_string(arg(ctx, 2)) + ") -- reverb is accepted but not modelled");
+    // It does use it. A run logs RevType(1) -- a small room -- and
+    // RevVON(1, 1), both the dry and the wet path switched on. RevParam is
+    // never called, so the delay and feedback stay at the type's defaults.
+    //
+    // Reported on CHANGE rather than once. The first run logged
+    // RevEVOL(0, 0) -- the effect send silenced -- which read as "the game
+    // asks for reverb and then turns it all the way down". But log_once only
+    // ever shows the first call, so a send the game raises later for a
+    // stairwell or a cutscene would never have appeared. The distinction
+    // decides whether modelling the reverb is audible work or no work at all,
+    // so it is worth four slots of state.
+    static constexpr const char *kRevCalls[4] = {"__sceSasRevType", "__sceSasRevParam", "__sceSasRevEVOL",
+                                                 "__sceSasRevVON"};
+    for (std::size_t i = 0; i < 4u; ++i) {
+        hle.add("sceSasCore", kRevCalls[i], [i](Runtime &, AllegrexContext &ctx) {
+            // Signed: RevType uses -1 for OFF.
+            const std::int32_t a = static_cast<std::int32_t>(arg(ctx, 1));
+            const std::int32_t b = static_cast<std::int32_t>(arg(ctx, 2));
+            // One slot per call. The four handlers share this lambda body, so
+            // they share these arrays, which is why they are indexed by i.
+            static std::array<std::int32_t, 4> last_a{};
+            static std::array<std::int32_t, 4> last_b{};
+            static std::array<bool, 4> seen{};
+            static std::array<int, 4> printed{};
+            if (!seen[i] || last_a[i] != a || last_b[i] != b) {
+                seen[i] = true;
+                last_a[i] = a;
+                last_b[i] = b;
+                // Capped: a game sweeping a send every frame must not fill the log.
+                if (printed[i]++ < 32) {
+                    std::cout << "[sas] " << kRevCalls[i] << "(" << a << ", " << b
+                              << ") -- reverb is accepted but not modelled\n";
+                }
+            }
             kernel().finish(ctx, 0u);
         });
     }

@@ -54,6 +54,11 @@ from PIL import Image
 MAX_EDGE = 2048
 # Below this there is nothing for a model to work with, and the result is
 # invention rather than restoration.
+#
+# It is a default rather than a rule: a tiled strip is the exception. Metal
+# Gear Ac!d draws its barrier posts and railings from 32x8 and 64x8 tiles,
+# which are wide enough to carry a real pattern and fail this test only on
+# their height. --min-edge lowers it for those.
 MIN_EDGE = 16
 
 
@@ -177,6 +182,8 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=0, help="stop after this many (for a trial run)")
     parser.add_argument("--skip-existing", action="store_true",
                         help="leave textures the pack already has, so a re-run only does the new ones")
+    parser.add_argument("--min-edge", type=int, default=MIN_EDGE,
+                        help=f"shortest edge worth enlarging (default {MIN_EDGE}); lower it for tiled strips")
     args = parser.parse_args()
 
     sources = sorted(p for p in args.dump.glob("*.png"))
@@ -209,7 +216,7 @@ def main() -> int:
         reason = ""
         if max(width, height) * 4 > MAX_EDGE:
             reason = f"already {width}x{height}"
-        elif min(width, height) < MIN_EDGE:
+        elif min(width, height) < args.min_edge:
             reason = f"only {width}x{height}"
         elif not args.all:
             pixel_art, why = is_pixel_art(image)

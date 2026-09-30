@@ -46,7 +46,6 @@ if(MGA_RENDERER)
                     "kPostFragmentShader=${MGA_PROFILE_DIR}/host/gpu/shaders/post.frag"
                     "kAoFragmentShader=${MGA_PROFILE_DIR}/host/gpu/shaders/ao.frag"
                     "kShadowVertexShader=${MGA_PROFILE_DIR}/host/gpu/shaders/shadow.vert"
-                    "kDofFragmentShader=${MGA_PROFILE_DIR}/host/gpu/shaders/dof.frag"
                     "kReflectFragmentShader=${MGA_PROFILE_DIR}/host/gpu/shaders/reflect.frag"
             DEPENDS "${MGA_PROFILE_DIR}/host/gpu/shaders/ge.vert"
                     "${MGA_PROFILE_DIR}/host/gpu/shaders/ge.frag"
@@ -54,7 +53,6 @@ if(MGA_RENDERER)
                     "${MGA_PROFILE_DIR}/host/gpu/shaders/post.frag"
                     "${MGA_PROFILE_DIR}/host/gpu/shaders/ao.frag"
                     "${MGA_PROFILE_DIR}/host/gpu/shaders/shadow.vert"
-                    "${MGA_PROFILE_DIR}/host/gpu/shaders/dof.frag"
                     "${MGA_PROFILE_DIR}/host/gpu/shaders/reflect.frag"
                     "${MGA_PROFILE_DIR}/tools/embed_shaders.py"
             COMMENT "Compiling GE shaders to SPIR-V")

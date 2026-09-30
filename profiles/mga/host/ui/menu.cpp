@@ -239,15 +239,7 @@ void Menu::video() {
         settings::save();
     }
     {
-        RowOptions o = options_for(
-            "video.pixel_perfect",
-            "Shows the picture at a whole multiple of the PSP's 480x272 rather than at whatever fraction of the "
-            "window fits. An uneven scale has to give some rows and columns one more screen pixel than their "
-            "neighbours, which is what makes straight lines and small text look uneven; a whole multiple gives "
-            "every pixel the same square. The picture is smaller for it -- on a 1080p screen the largest whole "
-            "multiple is three, not the 3.97 that would fill the height -- so it is a trade rather than a "
-            "straight win. For a picture with no resampling at all, set the render resolution to the same "
-            "multiple.");
+        RowOptions o = options_for("video.pixel_perfect", "Scales the picture by whole numbers only, so every one of the game's pixels stays the same size and shape.");
         o.disabled = !s.keep_aspect;
         if (o.disabled) o.note = "needs Original aspect";
         if (toggle_row("Pixel-perfect scaling", s.pixel_perfect && s.keep_aspect, o)) {
@@ -264,15 +256,7 @@ void Menu::video() {
         settings::save();
     }
     {
-        RowOptions o = options_for(
-            "video.fast_loading",
-            "Lets the clock run ahead while the game loads. Reading the disc is instant here, but a load still takes "
-            "as long as it did on the hardware: the loader reads a piece, unpacks it, and waits on the clock, which "
-            "the port holds to the PSP's pace. This lets that hold go, and only then. A load is recognised from what "
-            "the game does rather than from a timer -- it is reading the disc and it is silent -- so the first "
-            "audible sample, a held button, the menu or Game speed Unlimited all put it back to real time at once. "
-            "Off by default because whether this game's loader waits on the clock the way the one it was written "
-            "against did has not been checked.");
+        RowOptions o = options_for("video.fast_loading", "Skips the waiting the PSP needed for its disc, so loading passes quickly.");
         if (toggle_row("Fast loading", s.fast_loading, o)) {
             s.fast_loading = !s.fast_loading;
             settings::save();
@@ -319,12 +303,18 @@ void Menu::video() {
         char label[16];
         if (s.texture_scale <= 1u) std::snprintf(label, sizeof(label), "Off");
         else std::snprintf(label, sizeof(label), "%ux", s.texture_scale);
-        if (choice_row("Texture scaling", label,
+        if (const int delta = choice_row("Texture scaling", label,
                        options_for("video.texture_scale",
                                    "Enlarges the game's textures before they are drawn, so they keep their detail "
                                    "at a raised internal resolution instead of being blurred up to it. Costs memory "
                                    "and a moment's work the first time each texture is seen."))) {
-            s.texture_scale = s.texture_scale >= settings::kMaxTextureScale ? 1u : s.texture_scale + 1u;
+            // Left and right both used to step up: the row tested only
+            // whether a key had been pressed and then always incremented,
+            // throwing the direction away. Every other row cycles on the
+            // delta, and now so does this one.
+            const int count = static_cast<int>(settings::kMaxTextureScale);
+            const int current = static_cast<int>(s.texture_scale) - 1;
+            s.texture_scale = static_cast<std::uint32_t>(cycle(current, delta, count)) + 1u;
             renderer().set_texture_scale(s.texture_scale, s.texture_scale_sharp);
             settings::save();
         }
@@ -341,11 +331,7 @@ void Menu::video() {
         }
     }
     {
-        RowOptions o = options_for("video.texture_pack",
-                                   "Use replacement textures from the textures folder in the data directory, when "
-                                   "there are any. A replacement is used at whatever size it was drawn, and is not "
-                                   "enlarged again by the scaling above. Set MGA_DUMP_TEXTURES=1 to write out every "
-                                   "texture the game draws, ready to be repainted and dropped back in.");
+        RowOptions o = options_for("video.texture_pack", "Uses the enlarged textures from your textures folder in place of the game's own.");
         const bool present = renderer().texture_pack_available();
         if (!present) o.note = "none found";
         if (toggle_row("Texture pack", s.texture_pack && present, o)) {
@@ -356,13 +342,7 @@ void Menu::video() {
     }
     section("Lighting");
     {
-        RowOptions o = options_for(
-            "video.light_per_pixel",
-            "Works the game's lights out for every pixel instead of at the corners of every triangle. The lights, the "
-            "materials and the falloff are all the game's own -- only the place they are calculated changes. The PSP "
-            "had no choice about it, and on models of a few hundred triangles it shows: shading goes flat across each "
-            "triangle, and a highlight jumps from one corner to the next instead of sliding across a surface. Costs "
-            "almost nothing on a modern card. Off restores exactly what the hardware did.");
+        RowOptions o = options_for("video.light_per_pixel", "Works out the lighting for every pixel rather than every corner, so highlights land where they belong.");
         if (toggle_row("Per-pixel lighting", s.light_per_pixel, o)) {
             s.light_per_pixel = !s.light_per_pixel;
             renderer().set_light_per_pixel(s.light_per_pixel);
@@ -375,14 +355,7 @@ void Menu::video() {
         int level = 0;
         for (int i = 3; i > 0; --i)
             if (s.surface_relief >= levels[i] - 0.01f) { level = i; break; }
-        RowOptions o = options_for(
-            "video.surface_relief",
-            "Treats a texture's own light and dark as relief, so a wall lights as though the brickwork painted on it "
-            "stood out from it. On geometry this coarse a wall really is two flat triangles, and the only record of "
-            "its surface is the painting -- where the dark parts are, almost always, the parts that were recessed "
-            "when someone drew it. That is a guess rather than a measurement, so it reads well on stone, panels and "
-            "grating and less well on anything whose dark patches are just dark paint. It reads the same texture the "
-            "game draws, so a texture pack improves it for free.");
+        RowOptions o = options_for("video.surface_relief", "Gives flat surfaces a little texture, so walls and floors catch the light instead of looking like paper.");
         o.disabled = !s.light_per_pixel;
         if (o.disabled) o.note = "needs per-pixel lighting";
         if (const int delta = choice_row("Surface relief", names[level], o)) {
@@ -392,14 +365,7 @@ void Menu::video() {
         }
     }
     {
-        RowOptions o = options_for(
-            "video.accurate_specular",
-            "Works the highlights out from where the camera actually is. The hardware assumed a viewer looking down "
-            "one axis from infinitely far away, which was free and, in its own space, close enough -- but the lights "
-            "are now worked out in the world, where that assumption does not hold, and a highlight that cannot "
-            "depend on a viewing direction is a highlight that does not move when you move. This also brings a "
-            "Fresnel term, which brightens a surface seen edge-on: it is why a floor goes bright into the distance, "
-            "and no hardware of the era modelled it.");
+        RowOptions o = options_for("video.accurate_specular", "Makes shiny surfaces brighten as you look along them, the way real ones do.");
         if (toggle_row("Accurate highlights", s.accurate_specular, o)) {
             s.accurate_specular = !s.accurate_specular;
             renderer().set_accurate_specular(s.accurate_specular, s.fresnel);
@@ -412,14 +378,7 @@ void Menu::video() {
         int level = 0;
         for (int i = 3; i > 0; --i)
             if (s.ambient_shape >= levels[i] - 0.01f) { level = i; break; }
-        RowOptions o = options_for(
-            "video.ambient_shape",
-            "Gives the ambient light a direction. The hardware filled every surface with one identical constant, so "
-            "a wall facing the light and a wall facing away from it are lifted by exactly the same amount and "
-            "nothing in shadow has any shape at all. Real ambient is light that bounced off whatever the main light "
-            "is hitting, so it arrives unevenly. The axis used is that light's own direction rather than a guess at "
-            "which way is up, because nothing here knows which way is up and a wrong guess would shade every "
-            "surface backwards.");
+        RowOptions o = options_for("video.ambient_shape", "Lets the background light follow the shape of things instead of lying flat over everything.");
         if (const int delta = choice_row("Ambient shape", names[level], o)) {
             s.ambient_shape = levels[cycle(level, delta, 4)];
             renderer().set_ambient_shape(s.ambient_shape);
@@ -427,15 +386,7 @@ void Menu::video() {
         }
     }
     {
-        RowOptions o = options_for(
-            "video.linear_light",
-            "Applies light in the space light actually adds up in. A texture holds values that were authored by eye "
-            "on a display, and the hardware multiplied one straight against a light level -- which treats an encoded "
-            "number as though it were an amount of light. That is the flat, plasticky falloff of the era: too dark "
-            "through the midtones, then abruptly white where it clips. This converts the texture first, applies the "
-            "light, and rolls the bright end off along a film curve instead of cutting it flat, so a highlight keeps "
-            "its shape and its colour as it goes bright. Only lit geometry takes the path -- the interface and the "
-            "baked scenery carry finished colours and are left exactly alone. Off is what the hardware did.");
+        RowOptions o = options_for("video.linear_light", "Mixes light the way a camera does, which stops bright areas washing out and dark ones going flat.");
         if (toggle_row("Linear lighting and tonemap", s.linear_light, o)) {
             s.linear_light = !s.linear_light;
             renderer().set_linear_light(s.linear_light);
@@ -448,12 +399,7 @@ void Menu::video() {
         int level = 1;
         for (int i = 0; i < 4; ++i)
             if (s.tonemap_curve >= levels[i] - 0.01f) level = i;
-        RowOptions o = options_for(
-            "video.tonemap_curve",
-            "How hard the film curve bends. Neutral leaves a mid grey exactly where the old path had it, so what "
-            "changes is the falloff and the highlights rather than the overall brightness -- which is the setting to "
-            "judge the toggle on. Either way a fully lit white surface is still white. Lower is closer to a plain "
-            "clip; higher lifts the midtones and holds on to more of the bright end.");
+        RowOptions o = options_for("video.tonemap_curve", "How the brightest parts fade to white. Stronger settings keep more detail in them.");
         o.disabled = !s.linear_light;
         if (o.disabled) o.note = "needs linear lighting";
         if (const int delta = choice_row("Tonemap", names[level], o)) {
@@ -468,12 +414,7 @@ void Menu::video() {
         int level = 0;
         for (int i = 3; i > 0; --i)
             if (s.light_intensity >= levels[i] - 0.01f) { level = i; break; }
-        RowOptions o = options_for(
-            "video.light_intensity",
-            "How much light reaches the tonemap. The game's lights and materials are all fractions of one, so the "
-            "picture hardly ever passes full brightness and the curve's shoulder -- the whole reason for having a "
-            "curve -- has nothing to roll off. Raising this gives it something to work on, and gives bloom "
-            "something above its threshold to find. Faithful keeps the game's own levels.");
+        RowOptions o = options_for("video.light_intensity", "How strong the lighting is overall.");
         o.disabled = !s.linear_light;
         if (o.disabled) o.note = "needs linear lighting";
         if (const int delta = choice_row("Light intensity", names[level], o)) {
@@ -511,14 +452,7 @@ void Menu::video() {
         int level = 0;
         for (int i = 3; i > 0; --i)
             if (s.bloom >= levels[i] - 0.01f) { level = i; break; }
-        RowOptions o = options_for(
-            "video.bloom",
-            "A glow around bright things. A lens scatters some of the light from a bright source over what is near "
-            "it and a camera sensor blooms outright; a PSP does neither, and in rooms lit by a few hard lights the "
-            "absence reads as flatness. Only light above a threshold spills, so ordinary surfaces do not glow -- "
-            "which is the difference between bloom and a blur over the whole picture. Kept modest on purpose: this "
-            "is one pass over the finished frame rather than a chain of blurred half-size copies, so a wide glow "
-            "would show its sampling.");
+        RowOptions o = options_for("video.bloom", "Lets bright things glow into what is around them.");
         o.disabled = !s.post_process;
         if (o.disabled) o.note = "needs post-processing";
         if (const int delta = choice_row("Bloom", names[level], o)) {
@@ -545,33 +479,12 @@ void Menu::video() {
         }
     }
     {
-        const float levels[4] = {0.0f, 0.4f, 0.7f, 1.0f};
-        const char *names[4] = {"Off", "Subtle", "Medium", "Strong"};
-        int level = 0;
-        for (int i = 3; i > 0; --i)
-            if (s.depth_of_field >= levels[i] - 0.01f) { level = i; break; }
-        RowOptions o = options_for("video.depth_of_field",
-                                  "The background goes soft with distance, focused on whatever is under the middle "
-                                  "of the screen. Drawn before the heads-up display, so the display stays sharp. "
-                                  "Nothing nearer than the focal plane is ever blurred: a real lens would blur it, "
-                                  "and here that would mostly be Snake's own shoulder.");
-        if (const int delta = choice_row("Depth of field", names[level], o)) {
-            s.depth_of_field = levels[cycle(level, delta, 4)];
-            renderer().set_depth_of_field(s.depth_of_field);
-            settings::save();
-        }
-    }
-    {
         const float levels[4] = {0.0f, 0.35f, 0.65f, 1.0f};
         const char *names[4] = {"Off", "Light", "Medium", "Strong"};
         int level = 0;
         for (int i = 3; i > 0; --i)
             if (s.sharpen >= levels[i] - 0.01f) { level = i; break; }
-        RowOptions o = options_for("video.sharpen",
-                                  "Puts back the edge definition that magnifying a 480x272 picture takes out. It "
-                                  "measures how much room each neighbourhood has left before it would clip, so it "
-                                  "does not leave the pale outlines an ordinary sharpen does. Strong on top of "
-                                  "anti-aliasing will fight it: the one softens edges and the other hardens them.");
+        RowOptions o = options_for("video.sharpen", "Crispens the edges in the finished picture.");
         o.disabled = !s.post_process;
         if (o.disabled) o.note = "needs post-processing";
         if (const int delta = choice_row("Sharpening", names[level], o)) {
@@ -586,11 +499,7 @@ void Menu::video() {
         int level = 0;
         for (int i = 3; i > 0; --i)
             if (s.colour_grade >= levels[i] - 0.01f) { level = i; break; }
-        RowOptions o = options_for("video.colour_grade",
-                                  "How far the picture is taken towards the grade below. The art was drawn for a "
-                                  "small, dim screen, and on a modern one it reads as washed out. Subtle is the "
-                                  "point: turned up far this stops looking like a better screen and starts looking "
-                                  "like a filter.");
+        RowOptions o = options_for("video.colour_grade", "How far the picture is taken towards the grade chosen below.");
         o.disabled = !s.post_process;
         if (o.disabled) o.note = "needs post-processing";
         if (const int delta = choice_row("Colour", names[level], o)) {
@@ -637,11 +546,7 @@ void Menu::video() {
             index = static_cast<int>(names.size()) - 1;
         }
 
-        RowOptions o = options_for("video.colour_lut",
-                                  "The grade itself. Built-in is a contrast and saturation lift with two constants "
-                                  "in it. A .cube is a colour grading table, which is what every grading tool "
-                                  "exports: make a grade somewhere that shows you the picture while you turn the "
-                                  "knobs, save it into the grades folder beside settings.ini, and it appears here.");
+        RowOptions o = options_for("video.colour_lut", "Which colour look the picture is given. Files you put in the grades folder appear here.");
         o.disabled = !s.post_process;
         if (o.disabled) o.note = "needs post-processing";
         else if (missing) o.note = "file not found";
@@ -703,15 +608,10 @@ void Menu::video() {
     }
     section("Frame pacing");
     {
-        RowOptions o = options_for(
-            "video.frame_smoothing",
-            "Shows an extra image between the game's own frames, worked out by carrying the motion in the last two "
-            "forward. Metal Gear Ac!d draws thirty frames a second and takes exactly one step of its simulation per "
-            "frame, so it cannot be asked for more without the whole game running at double speed -- the frames in "
-            "between have to be invented instead. Motion is predicted rather than known, so something that stops or "
-            "reverses sharply can overshoot for half a frame. The interface and anything else laid out to the pixel "
-            "is left exactly where the game put it.");
-        if (toggle_row("Frame smoothing", s.frame_smoothing, o)) {
+        RowOptions o = options_for("video.frame_smoothing",
+                                   "60 fills in an extra image between the game's own frames, so movement looks "
+                                   "smoother. 30 shows only what the game draws.");
+        if (choice_row("FPS", s.frame_smoothing ? "60" : "30", o)) {
             s.frame_smoothing = !s.frame_smoothing;
             settings::save();
         }
@@ -738,12 +638,6 @@ void Menu::video() {
             settings::save();
         }
     }
-    if (choice_row("Game speed", s.unthrottled ? "Unlimited" : "Normal",
-                   options_for("video.unthrottled", "Normal holds the game to real time. Unlimited lets it run as "
-                                                    "fast as frames can be drawn, which also speeds up the game."))) {
-        s.unthrottled = !s.unthrottled;
-        settings::save();
-    }
     {
         static const char *const kPerf[] = {"Off", "Overlay", "Overlay and log", "Log only"};
         const int current = static_cast<int>(s.perf);
@@ -756,7 +650,6 @@ void Menu::video() {
             settings::save();
         }
     }
-    font_rows();
     ImGui::Dummy({0.0f, font_gap()});
     if (button_row("Restore video defaults", {false, {}, "Every setting on this page back to how PSPRecomp ships."})) {
         const settings::Settings &d = settings::defaults();

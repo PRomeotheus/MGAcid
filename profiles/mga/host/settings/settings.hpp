@@ -63,7 +63,6 @@ struct Settings {
     std::string colour_lut;
     float bloom{};                     // 0 off .. 1 strongest; glow around bright things; needs post_process
     float sharpen{};                   // 0 off .. 1 strongest; contrast-adaptive sharpen; needs post_process
-    float depth_of_field{};            // 0 off .. 1 strongest; the background softens with distance
     float reflections{};               // 0 off .. 1 strongest; screen-space reflections, floors only
     // Show an extra image between the game's own frames, built by carrying the
     // last frame's motion forward. The game itself is untouched and still runs

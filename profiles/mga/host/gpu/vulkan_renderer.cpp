@@ -159,19 +159,6 @@ static_assert(offsetof(PostPush, depth) == 32u, "post.frag reads depth at 32");
 static_assert(offsetof(PostPush, bloom) == 48u, "post.frag reads bloom_params at 48");
 static_assert(offsetof(PostPush, sharpen) == 64u, "post.frag reads sharpen at 64");
 
-// Depth of field, at the seam. Reads the half-size copy of the world and the
-// depth it was drawn with.
-struct DofPush {
-    // xy: one texel of the half-size copy; zw: one texel of the depth buffer.
-    std::array<float, 4> texel{};
-    // x: +1 when a larger depth value is nearer; y: strength; z: spread;
-    // w: the widest blur radius in half-size texels.
-    std::array<float, 4> params{};
-};
-static_assert(sizeof(DofPush) == 32u, "DofPush must match dof.frag's push block");
-static_assert(offsetof(DofPush, texel) == 0u, "dof.frag reads texel at 0");
-static_assert(offsetof(DofPush, params) == 16u, "dof.frag reads params at 16");
-
 // The ambient occlusion pass reads depth and nothing else, so it needs neither
 // the letterbox rectangle nor the effect flags.
 struct AoPush {
@@ -218,15 +205,6 @@ constexpr std::size_t kMaxPostSets = 8u;
 // is sized to exactly what its other users can reach, so an uncounted set is one
 // the pool may not have when a full texture cache has claimed the rest.
 constexpr std::size_t kMaxAoSets = 8u;
-// The widest the background goes, in the game's own pixels. Six is about the
-// most that still reads as defocus on a 480x272 picture; past that the
-// background stops being a place and becomes a wash.
-constexpr float kDofRadiusPspPixels = 6.0f;
-// How far past the focal plane the blur takes to saturate, as a fraction of
-// what is left between it and the far plane. A quarter puts the far wall of an
-// ordinary room fully soft while the middle of it is only slightly so.
-constexpr float kDofSpread = 0.25f;
-
 struct GpuVertex {
     float x{}, y{}, z{}, w{1.0f};
     float u{}, v{};
@@ -1021,20 +999,12 @@ struct VulkanRenderer::Impl {
     std::map<VkImageView, VkDescriptorSet> seam_read_descriptors;
     [[nodiscard]] VkDescriptorSet seam_read_descriptor_for(VkImageView depth);
 
-    VkShaderModule dof_fragment_shader{};
-    VkPipelineLayout dof_pipeline_layout{};
-    VkPipeline dof_pipeline{};
-    bool create_dof_pipeline(std::string &error);
     // The two seam passes that read the copy and mix into the attachment are
     // the same pipeline in every respect but their fragment shader and the
     // size of their push block.
     bool create_seam_blend_pipeline(VkShaderModule fragment, std::uint32_t push_size, VkPipelineLayout &layout,
                                     VkPipeline &pipeline, std::string &error);
     bool create_seam_read_layout(std::string &error);
-    [[nodiscard]] bool dof_available() const {
-        return dof_pipeline != VK_NULL_HANDLE && blur_ready;
-    }
-    float dof_strength{};
 
     VkShaderModule reflect_fragment_shader{};
     VkPipelineLayout reflect_pipeline_layout{};
@@ -1634,7 +1604,6 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
     impl.post_ao = std::clamp(player.contact_shadows, 0.0f, 1.0f);
     impl.post_grade = std::clamp(player.colour_grade, 0.0f, 1.0f);
     impl.post_sharpen = std::clamp(player.sharpen, 0.0f, 1.0f);
-    impl.dof_strength = std::clamp(player.depth_of_field, 0.0f, 1.0f);
     impl.reflect_strength = std::clamp(player.reflections, 0.0f, 1.0f);
     // More steps find a reflection further along the floor and cost a texture
     // read apiece. Left as an environment variable, like the other step
@@ -1956,9 +1925,6 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
     // That ordering is not a detail: calling it here passed a null command
     // pool to vkAllocateCommandBuffers, which is undefined and crashed the
     // driver on every launch.
-    std::string dof_error;
-    if (!impl.create_dof_pipeline(dof_error))
-        std::cout << "[render] depth of field unavailable: " << dof_error << "\n";
     std::string reflect_error;
     if (!impl.create_reflect_pipeline(reflect_error))
         std::cout << "[render] reflections unavailable: " << reflect_error << "\n";
@@ -2099,13 +2065,13 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
     }
     impl.bind_shadow_map();
 
-    // The half-size copy of the world that depth of field and reflections read.
-    // Here rather than beside their pipelines because create_blur needs a
-    // command buffer, and the command pool is created between the two.
-    if (impl.dof_pipeline != VK_NULL_HANDLE || impl.reflect_pipeline != VK_NULL_HANDLE) {
+    // The half-size copy of the world that the reflections read. Here rather
+    // than beside their pipeline because create_blur needs a command buffer,
+    // and the command pool is created between the two.
+    if (impl.reflect_pipeline != VK_NULL_HANDLE) {
         std::string blur_error;
         if (!impl.create_blur(blur_error))
-            std::cout << "[render] depth of field and reflections unavailable: " << blur_error << "\n";
+            std::cout << "[render] reflections unavailable: " << blur_error << "\n";
     }
 
     // The identity table. Two entries a side is not a coarse identity, it is
@@ -2859,12 +2825,11 @@ VkDescriptorSet VulkanRenderer::Impl::seam_read_descriptor_for(VkImageView depth
 void VulkanRenderer::Impl::record_scene_ao(Target &target) {
     if (ao_render_pass == VK_NULL_HANDLE || target.depth_view == VK_NULL_HANDLE) return;
     const bool want_ao = ao_available() && post_ao > 0.0f;
-    const bool want_dof = dof_available() && dof_strength > 0.0f;
     // Reflections need a projection to rebuild world positions with, and the
     // caveat that comes with it: it is the last 3D draw's, and the GE changes
     // projection from draw to draw.
     const bool want_reflect = reflect_available() && reflect_strength > 0.0f && scene_view_projection_valid;
-    if (!want_ao && !want_dof && !want_reflect) return;
+    if (!want_ao && !want_reflect) return;
     const VkFramebuffer framebuffer = ao_framebuffer_for(target);
     const VkDescriptorSet set = want_ao ? ao_descriptor_for(target.depth_view) : VK_NULL_HANDLE;
     if (framebuffer == VK_NULL_HANDLE || (want_ao && set == VK_NULL_HANDLE)) return;
@@ -2879,7 +2844,7 @@ void VulkanRenderer::Impl::record_scene_ao(Target &target) {
     // light to the air are things a camera sees through its own defocus, not
     // things that should be defocused separately from what they are applied
     // to. Doing it the other way would also mean two blits.
-    if (want_dof || want_reflect) capture_blur(target);
+    if (want_reflect) capture_blur(target);
     transition(command_buffer, target.depth, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
 
@@ -2936,36 +2901,6 @@ void VulkanRenderer::Impl::record_scene_ao(Target &target) {
                                    sizeof(mirror), &mirror);
                 vkCmdDraw(command_buffer, 3u, 1u, 0u, 0u);
             }
-        }
-    }
-    // Last, because it is the only one that mixes rather than adds or
-    // multiplies: it takes the picture the two above have finished making and
-    // softens what is far away. The copy it blurs was taken before them, so
-    // the blurred colour is very slightly the older picture -- a difference of
-    // one crease darkening and one shaft of light, on exactly the pixels that
-    // are out of focus, which is where nobody can see it.
-    if (want_dof) {
-        if (const VkDescriptorSet read_set = seam_read_descriptor_for(target.depth_view);
-            read_set != VK_NULL_HANDLE) {
-            DofPush focus{};
-            focus.texel = {1.0f / static_cast<float>(std::max(blur_extent.width, 1u)),
-                           1.0f / static_cast<float>(std::max(blur_extent.height, 1u)),
-                           1.0f / static_cast<float>(std::max(target_extent.width, 1u)),
-                           1.0f / static_cast<float>(std::max(target_extent.height, 1u))};
-            // The radius follows the internal resolution, so the background is
-            // the same amount soft on screen however far the target is scaled
-            // up -- the same reasoning as the bloom radius and the occlusion
-            // tap radius. kDofRadiusPspPixels is in the game's own pixels, and
-            // the copy is half the target, hence the halving.
-            const float radius =
-                std::max(2.0f, static_cast<float>(blur_extent.height) / 136.0f * kDofRadiusPspPixels);
-            focus.params = {depth_reversed ? 1.0f : -1.0f, dof_strength, kDofSpread, radius};
-            vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, dof_pipeline);
-            vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, dof_pipeline_layout, 0u, 1u,
-                                    &read_set, 0u, nullptr);
-            vkCmdPushConstants(command_buffer, dof_pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0u, sizeof(focus),
-                               &focus);
-            vkCmdDraw(command_buffer, 3u, 1u, 0u, 0u);
         }
     }
     vkCmdEndRenderPass(command_buffer);
@@ -3085,18 +3020,6 @@ bool VulkanRenderer::Impl::create_seam_blend_pipeline(VkShaderModule fragment, s
 
 // Both of these are built on the occlusion pass's render pass, so both must be
 // created after it and both are skipped when that one did not come up.
-bool VulkanRenderer::Impl::create_dof_pipeline(std::string &error) {
-    if (ao_render_pass == VK_NULL_HANDLE) return true;
-    VkShaderModuleCreateInfo module_info{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
-    module_info.codeSize = sizeof(kDofFragmentShader);
-    module_info.pCode = kDofFragmentShader;
-    if (!check(vkCreateShaderModule(device, &module_info, nullptr, &dof_fragment_shader), "vkCreateShaderModule",
-               error))
-        return false;
-    if (!create_seam_read_layout(error)) return false;
-    return create_seam_blend_pipeline(dof_fragment_shader, sizeof(DofPush), dof_pipeline_layout, dof_pipeline, error);
-}
-
 bool VulkanRenderer::Impl::create_reflect_pipeline(std::string &error) {
     if (ao_render_pass == VK_NULL_HANDLE) return true;
     // 128 bytes is what Vulkan guarantees, and this block is exactly that, so
@@ -4887,11 +4810,6 @@ void VulkanRenderer::set_reflections(float strength) {
     impl_->reflect_strength = std::clamp(strength, 0.0f, 1.0f);
 }
 
-void VulkanRenderer::set_depth_of_field(float strength) {
-    if (!impl_) return;
-    impl_->dof_strength = std::clamp(strength, 0.0f, 1.0f);
-}
-
 void VulkanRenderer::set_sharpen(float strength) {
     if (!impl_) return;
     impl_->post_sharpen = std::clamp(strength, 0.0f, 1.0f);
@@ -6561,9 +6479,6 @@ void VulkanRenderer::shutdown() {
     vkDestroyPipeline(impl.device, impl.reflect_pipeline, nullptr);
     vkDestroyPipelineLayout(impl.device, impl.reflect_pipeline_layout, nullptr);
     vkDestroyShaderModule(impl.device, impl.reflect_fragment_shader, nullptr);
-    vkDestroyPipeline(impl.device, impl.dof_pipeline, nullptr);
-    vkDestroyPipelineLayout(impl.device, impl.dof_pipeline_layout, nullptr);
-    vkDestroyShaderModule(impl.device, impl.dof_fragment_shader, nullptr);
     vkDestroyDescriptorSetLayout(impl.device, impl.seam_read_layout, nullptr);
     vkDestroyPipeline(impl.device, impl.ao_pipeline, nullptr);
     vkDestroyPipelineLayout(impl.device, impl.ao_pipeline_layout, nullptr);

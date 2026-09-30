@@ -167,12 +167,6 @@ public:
     // edges back without the white outlines a plain unsharp mask leaves.
     // 0 turns it off. Needs post-processing.
     void set_sharpen(float strength);
-    // The background goes soft with distance, focused on whatever is under the
-    // middle of the screen. Drawn at the seam between the world and the
-    // interface, so the heads-up display stays sharp. Everything nearer than
-    // the focal plane stays sharp too -- a real lens blurs the near field as
-    // well, and here that would be the player's own shoulder. 0 turns it off.
-    void set_depth_of_field(float strength);
     // Reflections on the floor, traced through the picture itself. Only on
     // surfaces that face up: there is nothing in a PSP display list that says
     // which materials are polished, so this asks the geometry instead, and a

@@ -85,14 +85,14 @@ Inspection inspect(const std::filesystem::path &path) {
     const std::string name = display_name(path);
     std::error_code ec;
     if (!std::filesystem::is_regular_file(path, ec))
-        throw InstallError("\"" + path_to_utf8(path) + "\" is not a file Yakumo can open.");
+        throw InstallError("\"" + path_to_utf8(path) + "\" is not a file MGAcid can open.");
     {
         std::ifstream in(path, std::ios::binary);
         std::array<char, 4> magic{};
         if (!in.read(magic.data(), magic.size()))
             throw InstallError("\"" + name + "\" is empty or cannot be read.");
         if (std::memcmp(magic.data(), "CISO", 4u) == 0 || std::memcmp(magic.data(), "ZISO", 4u) == 0)
-            throw InstallError("\"" + name + "\" is a compressed image. Yakumo needs an uncompressed .iso image of the "
+            throw InstallError("\"" + name + "\" is a compressed image. MGAcid needs an uncompressed .iso image of the "
                                "disc; decompress it first.");
     }
 
@@ -100,28 +100,28 @@ Inspection inspect(const std::filesystem::path &path) {
     try {
         iso.emplace(path);
     } catch (const std::exception &) {
-        throw InstallError("\"" + name + "\" is not a disc image Yakumo can read. Choose an uncompressed .iso image "
+        throw InstallError("\"" + name + "\" is not a disc image MGAcid can read. Choose an uncompressed .iso image "
                            "of the game's PSP disc.");
     }
 
     const auto sfo_entry = iso->find(kParamSfoPathOnDisc);
     if (!sfo_entry || sfo_entry->directory) {
         if (iso->find("PS3_GAME/PARAM.SFO"))
-            throw InstallError("\"" + name + "\" is a PlayStation 3 disc image. Yakumo needs the PSP disc image of " +
+            throw InstallError("\"" + name + "\" is a PlayStation 3 disc image. MGAcid needs the PSP disc image of " +
                                kGameTitle + ": an .iso whose top level holds a PSP_GAME folder.");
         throw InstallError("\"" + name + "\" is not a PSP game disc image: it has no PSP_GAME/PARAM.SFO.");
     }
     const auto sfo = parse_sfo(read_file(*iso, *sfo_entry));
     const auto disc_id = sfo.find("DISC_ID");
     if (disc_id == sfo.end())
-        throw InstallError("\"" + name + "\" has no disc id in PSP_GAME/PARAM.SFO, so it is not an image Yakumo "
+        throw InstallError("\"" + name + "\" has no disc id in PSP_GAME/PARAM.SFO, so it is not an image MGAcid "
                            "supports.");
     if (disc_id->second != kDiscId) {
         const auto title = sfo.find("TITLE");
         std::string what = "\"" + name + "\" is ";
         what += title != sfo.end() && !title->second.empty() ? title->second + " (" + disc_id->second + ")"
                                                               : "disc " + disc_id->second;
-        what += ". Yakumo supports only " + std::string(kGameTitle) + ", the USA release with disc id " +
+        what += ". MGAcid supports only " + std::string(kGameTitle) + ", the USA release with disc id " +
                 kDiscIdDisplay + ".";
         what += " Other releases and regions are not supported.";
         throw InstallError(what);
@@ -135,7 +135,7 @@ Inspection inspect(const std::filesystem::path &path) {
     result.eboot_bin = read_file(*iso, *eboot_entry);
     if (psprecomp::sha256_bytes(result.eboot_bin) != kEncryptedExecutableSha256)
         throw InstallError("\"" + name + "\" is " + kGameTitle + " (" + kDiscIdDisplay +
-                           "), but its executable is not the version Yakumo supports. The image may be patched, "
+                           "), but its executable is not the version MGAcid supports. The image may be patched, "
                            "modified or damaged; make it again from an unmodified disc.");
     result.info.size_bytes = iso->size_bytes();
     return result;

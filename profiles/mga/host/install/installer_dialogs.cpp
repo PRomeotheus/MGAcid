@@ -24,7 +24,7 @@ namespace mga::install {
 #if defined(MGA_HAS_SDL)
 namespace {
 
-constexpr const char *kTitle = "Yakumo setup";
+constexpr const char *kTitle = "MGAcid setup";
 
 struct Button {
     int id;
@@ -54,9 +54,9 @@ int ask(SDL_MessageBoxFlags kind, const char *title, const std::string &message,
 class DialogUi final : public InstallerUi {
 public:
     bool introduce(const std::filesystem::path &data_dir) override {
-        std::string text = std::string("Yakumo needs your own copy of ") + kGameTitle + " (" + kDiscIdDisplay +
+        std::string text = std::string("MGAcid needs your own copy of ") + kGameTitle + " (" + kDiscIdDisplay +
                            ") as a disc image (.iso).\n\n"
-                           "Choose the image next. Yakumo checks it, prepares the game's executable from it and "
+                           "Choose the image next. MGAcid checks it, prepares the game's executable from it and "
                            "copies it into its data folder, so the game keeps working if you move or delete the "
                            "original. You can also choose to use the image where it is.\n\n"
                            "Data folder:\n" +
@@ -96,7 +96,7 @@ public:
         if (!pick.path && !pick.error.empty()) {
             ask(SDL_MESSAGEBOX_ERROR, kTitle,
                 "The file dialog could not be opened (" + pick.error +
-                    ").\n\nRun the setup from a terminal instead:\n  Yakumo --install /path/to/image.iso",
+                    ").\n\nRun the setup from a terminal instead:\n  MGAcid --install /path/to/image.iso",
                 {{0, "Quit", SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT | SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT}});
         }
         return pick.path;
@@ -108,7 +108,7 @@ public:
         const std::string size = std::to_string(tenths / 10u) + "." + std::to_string(tenths % 10u) + " GB";
         const std::string text = "The image is " + std::string(kGameTitle) + " (" + kDiscIdDisplay +
                                  ") and passed its checks.\n\n"
-                                 "Copy it into Yakumo's data folder (recommended, " +
+                                 "Copy it into MGAcid's data folder (recommended, " +
                                  size +
                                  "), so the game keeps working if the original is moved or deleted?\n\n"
                                  "Or use it where it is, to save space. The image must then stay at:\n" +

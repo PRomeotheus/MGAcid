@@ -94,9 +94,9 @@ std::uint64_t configured_max_dispatches() {
 }
 
 constexpr const char *kUsage =
-    "usage: Yakumo [game_dir]\n"
-    "       Yakumo --install [image.iso [--in-place]]\n"
-    "       Yakumo --adhoc-server [port]\n"
+    "usage: MGAcid [game_dir]\n"
+    "       MGAcid --install [image.iso [--in-place]]\n"
+    "       MGAcid --adhoc-server [port]\n"
     "  game_dir        play from a directory holding EBOOT.ELF, disc.iso and ms0/\n"
     "  --install       run the setup again on screen, then play\n"
     "  --install image set up from image.iso without the setup screens, then exit\n"
@@ -214,11 +214,11 @@ std::optional<GameFiles> locate_game(const Options &options) {
                 const std::string where = install::path_to_utf8(installed->disc_image);
                 const std::string message =
                     installed->image_copied
-                        ? "The copy of the disc image Yakumo made is missing:\n" + where +
-                              "\n\nSet up again to restore it (Yakumo --install)."
-                        : "The disc image Yakumo was set up with is no longer at:\n" + where +
+                        ? "The copy of the disc image MGAcid made is missing:\n" + where +
+                              "\n\nSet up again to restore it (MGAcid --install)."
+                        : "The disc image MGAcid was set up with is no longer at:\n" + where +
                               "\n\nPut it back there, or set up again to choose where it is now "
-                              "(Yakumo --install).";
+                              "(MGAcid --install).";
                 if (!install::report_problem("Disc image not found", message, true)) return std::nullopt;
                 run_setup = true;
                 continue;
@@ -232,7 +232,7 @@ std::optional<GameFiles> locate_game(const Options &options) {
             std::cerr << "No game data found in " << install::path_to_utf8(data_dir)
                       << (checkout_game_dir.empty() ? std::string() : " or " + checkout_game_dir.string()) << ".\n"
                       << "Set up from your disc image of " << install::kGameTitle << " (" << install::kDiscIdDisplay
-                      << ") with:\n  Yakumo --install /path/to/image.iso\n";
+                      << ") with:\n  MGAcid --install /path/to/image.iso\n";
             return std::nullopt;
         }
         if (!install::run_installer(*ui, data_dir)) return std::nullopt;
@@ -251,7 +251,7 @@ int install_from_command_line(const Options &options) {
         std::cerr << "Setup failed: " << e.what() << "\n";
         return 1;
     }
-    std::cout << "Game data is ready in " << install::path_to_utf8(data_dir) << ". Start Yakumo to play.\n";
+    std::cout << "Game data is ready in " << install::path_to_utf8(data_dir) << ". Start MGAcid to play.\n";
     return 0;
 }
 
@@ -288,7 +288,7 @@ int run_adhoc_server(int argc, char **argv) {
     if (argc > 2) {
         const unsigned long port = std::strtoul(argv[2], nullptr, 10);
         if (port < 1024u || port > 65534u) {
-            std::cerr << "Yakumo: --adhoc-server takes a port from 1024 to 65534\n";
+            std::cerr << "MGAcid: --adhoc-server takes a port from 1024 to 65534\n";
             return 2;
         }
         config.adhocctl_port = static_cast<std::uint16_t>(port);
@@ -299,7 +299,7 @@ int run_adhoc_server(int argc, char **argv) {
         return 1;
     }
     std::string name = local_host_name();
-    if (name.empty()) name = "Yakumo server";
+    if (name.empty()) name = "MGAcid server";
     Discovery::get().start_announcing(config.adhocctl_port, [&server, name] {
         Announcement info;
         info.name = name;
@@ -341,7 +341,7 @@ int main(int argc, char **argv) {
                 std::cout << kUsage;
                 return 0;
             }
-            std::cerr << "Yakumo: " << e.what() << "\n" << kUsage;
+            std::cerr << "MGAcid: " << e.what() << "\n" << kUsage;
             return 2;
         }
         if (options.install_image) return install_from_command_line(options);
@@ -372,7 +372,7 @@ int main(int argc, char **argv) {
         g_running_runtime = &runtime;
         if (kDumpSignal != 0) std::signal(kDumpSignal, on_dump_signal);
 
-        std::cout << "Yakumo PSP bootstrap\n"
+        std::cout << "PSPRecomp bootstrap\n"
                   << "Executable: " << executable.string() << "\n"
                   << "SHA-256:    " << sha256 << "\n"
                   << "Disc image: " << (paths.disc_image.empty() ? "<none>" : paths.disc_image.string()) << "\n"
@@ -447,7 +447,7 @@ int main(int argc, char **argv) {
         return runtime.stop_reason().empty() ? 0 : 4;
     } catch (const std::exception &e) {
         mga::adhoc_shutdown();
-        std::cerr << "Yakumo error: " << e.what() << "\n";
+        std::cerr << "MGAcid error: " << e.what() << "\n";
         return 1;
     }
 }

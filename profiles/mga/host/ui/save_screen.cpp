@@ -333,7 +333,7 @@ void review_screen(bool back) {
     if (importable > 0) {
         const std::string label =
             replacing > 0 ? "Replace and import" : importable == 1 ? "Import this save" : "Import these saves";
-        std::string description = "Copies the save" + std::string(importable == 1 ? "" : "s") + " into Yakumo.";
+        std::string description = "Copies the save" + std::string(importable == 1 ? "" : "s") + " into MGAcid.";
         if (replacing > 0)
             description += " The save" + std::string(replacing == 1 ? " it replaces is" : "s they replace are") +
                            " not deleted: " + (replacing == 1 ? "it moves" : "they move") +

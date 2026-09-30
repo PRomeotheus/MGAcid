@@ -716,6 +716,10 @@ struct VulkanRenderer::Impl {
         // pack loaded the difference between those two readings is the
         // difference between 40 MB and 16 GB.
         VkDeviceSize bytes{};
+        // This texture came from the pack, so it is larger than the guest's
+        // own and its extra texels only survive if nothing snaps sampling to
+        // the guest texel grid. submit() reads this.
+        bool from_pack{};
     };
 
     RendererConfig config;
@@ -4086,6 +4090,7 @@ VulkanRenderer::Impl::Texture &VulkanRenderer::Impl::texture_for(const GuestMemo
                             texture_scale_sharp ? TextureScaleMode::Sharp : TextureScaleMode::Smooth);
     }
     Texture texture = create_texture(width, height, pixels.data());
+    texture.from_pack = replacement != nullptr;
     if (texture.descriptor == VK_NULL_HANDLE) {
         // The image and its memory may well exist even though whatever came after
         // them failed. Nothing is inserted into the cache, so this is the only
@@ -5914,7 +5919,21 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
                                  (uv[2] * width + static_cast<float>(source.x)) / static_cast<float>(kPspWidth),
                                  (uv[3] * height + static_cast<float>(source.y)) / static_cast<float>(kPspHeight)};
         } else {
-            texture_descriptor = impl.texture_for(memory, call.texture).descriptor;
+            const Impl::Texture &bound = impl.texture_for(memory, call.texture);
+            texture_descriptor = bound.descriptor;
+            // The same hazard the texture_scale exclusion above avoids, by the
+            // other route in. A pack replacement is enlarged too, but it does
+            // not go through texture_scale, so that test never sees it: the
+            // shader would snap an enlarged texture to the guest texel grid
+            // and put the blocks straight back. This is why an interface
+            // texture from the pack loads at 4x and looks untouched, while a
+            // character skin at the same 4x looks better -- the skin is not a
+            // through draw, so it was never snapped.
+            //
+            // Decided here rather than at snap_uv because the texture is not
+            // resolved until now, and resolving it earlier would move a
+            // readback with it.
+            if (snap_uv && bound.from_pack) push.texture_params[1] -= 16.0f;
         }
     }
 

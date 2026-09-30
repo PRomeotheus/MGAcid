@@ -265,11 +265,48 @@ bool FrameRecord::build_blend(const FrameRecord &earlier, const FrameRecord &lat
         // them, and text is the first thing to look wrong when it is not
         // where it was authored to be.
         if (b.through || b.clear_mode) continue;
-        // Too far to be the same thing having moved; see kMaxBlendPixels.
+        // Same number of vertices, or the loop below reads past the end of the
+        // older draw. The key carries the vertex count so this should never
+        // fire -- but the two guards further down both check it, and a read
+        // off the end of a vector is not the kind of thing to leave resting on
+        // "should".
+        if (a.vertices.size() != b.vertices.size()) continue;
+
+        // Far enough apart that they cannot be the same thing having moved;
+        // see kMaxBlendPixels.
+        //
+        // This now refuses when it cannot tell, which is the whole point of
+        // it. It used to read
+        //
+        //     if (screen_centre(a, ...) && screen_centre(b, ...) && far) continue;
+        //
+        // so a draw whose centroid would not project -- w at or behind the
+        // camera plane, which screen_centre reports by returning false -- had
+        // no distance test applied at all and was blended regardless. That is
+        // the wrong way round twice over: the draws that fail to project are
+        // the ones nearest the camera and half off the screen, which is
+        // exactly the population most likely to have been paired with the
+        // wrong partner in the first place.
+        //
+        // What a wrong pairing looks like is two different objects of the same
+        // shape averaged together. The key holds primitive, vertex and index
+        // counts, vertex type and texture address, and nothing about WHERE the
+        // draw is -- so two fence panels, or two sides of the same building,
+        // match each other perfectly. Halfway between them is a surface that
+        // exists in neither frame: a wedge across a roof, a wall in the wrong
+        // plane, geometry that looks broken rather than merely early.
         float ax = 0.0f, ay = 0.0f, bx = 0.0f, by = 0.0f;
-        if (screen_centre(a, ax, ay) && screen_centre(b, bx, by) &&
-            std::hypot(bx - ax, by - ay) > kMaxBlendPixels)
-            continue;
+        if (!screen_centre(a, ax, ay) || !screen_centre(b, bx, by)) continue;
+        if (std::hypot(bx - ax, by - ay) > kMaxBlendPixels) continue;
+        // And the same test in the world, because the one above cannot tell
+        // two objects apart when they sit on the same line from the eye. The
+        // world matrix of a piece of scenery is its own; the distance between
+        // two of them is the distance between the objects. A draw that really
+        // moved this far in one frame at sixty is not something an in-between
+        // frame can help with either.
+        const float world_step = std::hypot(std::hypot(b.world[12] - a.world[12], b.world[13] - a.world[13]),
+                                            b.world[14] - a.world[14]);
+        if (!(std::isfinite(world_step) && world_step <= kMaxBlendWorldUnits)) continue;
 
         // A flipbook's step, per axis and per draw: all of a draw's vertices
         // move together when the game turns the page, so this is one decision

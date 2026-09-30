@@ -202,6 +202,11 @@ private:
     // it was never in. Genuine motion this fast is a blur to the eye anyway,
     // so there is nothing to lose by leaving it where the game put it.
     static constexpr float kMaxBlendPixels = 80.0f;
+    // The same idea in world units. Two draws that match by key but sit this
+    // far apart are two different objects, not one that moved: a cell of this
+    // game's grid is 2000 units, so a quarter of one is further than anything
+    // travels between two frames at sixty a second.
+    static constexpr float kMaxBlendWorldUnits = 500.0f;
 
     // A texture coordinate that jumps this much of the draw's own texture span
     // in one game frame is a flipbook, not a scroll, and is held rather than

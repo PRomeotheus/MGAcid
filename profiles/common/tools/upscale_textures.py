@@ -175,6 +175,8 @@ def main() -> int:
     parser.add_argument("--all", action="store_true",
                         help="enlarge the interface art too, against the advice above")
     parser.add_argument("--limit", type=int, default=0, help="stop after this many (for a trial run)")
+    parser.add_argument("--skip-existing", action="store_true",
+                        help="leave textures the pack already has, so a re-run only does the new ones")
     args = parser.parse_args()
 
     sources = sorted(p for p in args.dump.glob("*.png"))
@@ -184,10 +186,17 @@ def main() -> int:
         return 1
 
     upscaler = None
-    kept = skipped = failed = 0
+    kept = skipped = failed = present = 0
     for path in sources:
         if args.limit and kept + skipped >= args.limit:
             break
+        # Before opening the file: the point of this is to not spend anything
+        # on a texture the pack already has. Widening the classifier (--all)
+        # after a pack exists would otherwise redo every earlier texture to
+        # reach the handful the old rules turned away.
+        if args.skip_existing and (args.out / path.name).exists():
+            present += 1
+            continue
         try:
             image = Image.open(path)
             image.load()
@@ -232,6 +241,8 @@ def main() -> int:
 
     what = "would enlarge" if args.list else "enlarged"
     print(f"\n{what} {kept}, left alone {skipped}, could not read {failed}")
+    if present:
+        print(f"already in the pack {present}")
     if not args.list and kept:
         print(f"pack written to {args.out}")
         print("turn on \"Replacement textures\" in the video menu")

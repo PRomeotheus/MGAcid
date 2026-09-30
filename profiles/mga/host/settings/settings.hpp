@@ -39,7 +39,6 @@ struct Settings {
     // multiplying encoded values together and clamping at one.
     bool linear_light{};
     float tonemap_curve{0.47f};        // 0 linear and clipped .. 4 heavily filmic; 0.47 holds mid grey
-    float volumetric{};                // 0 off .. 1 strongest; light in the air; needs shadow maps
     float surface_relief{};            // 0 off .. 8; texture shading read as relief; needs per-pixel lighting
     float field_of_view{1.0f};         // 0.8 .. 1.6; multiplies the field of view the game asks for
     bool fast_loading{};               // let emulated time run ahead while the game loads and is silent

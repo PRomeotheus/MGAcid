@@ -716,28 +716,6 @@ void Menu::video() {
             settings::save();
         }
     }
-    {
-        const float levels[4] = {0.0f, 0.25f, 0.5f, 0.85f};
-        const char *names[4] = {"Off", "Subtle", "Medium", "Strong"};
-        int level = 0;
-        for (int i = 3; i > 0; --i)
-            if (s.volumetric >= levels[i] - 0.01f) { level = i; break; }
-        RowOptions o = options_for(
-            "video.volumetric",
-            "Light in the air, not just on surfaces. The same map the shadows are cast from is asked the same "
-            "question repeatedly along the line from the eye to whatever it is looking at -- was anything standing "
-            "in the light's way here -- and the answers are added up. Where that line runs through open light the "
-            "air glows; where it runs behind a railing or a doorway a shaft appears with the caster's shape cut out "
-            "of it. It needs a light that casts, so it follows the shadow setting above, and it costs a march of "
-            "twenty-four samples a pixel.");
-        o.disabled = s.shadow_maps <= 0.0f || !renderer().volumetric_available();
-        if (o.disabled) o.note = s.shadow_maps <= 0.0f ? "needs cast shadows" : "unavailable";
-        if (const int delta = choice_row("Light shafts", names[level], o)) {
-            s.volumetric = levels[cycle(level, delta, 4)];
-            renderer().set_volumetric(s.volumetric);
-            settings::save();
-        }
-    }
     section("Frame pacing");
     {
         RowOptions o = options_for(
@@ -824,7 +802,6 @@ void Menu::video() {
         renderer().set_light_per_pixel(s.light_per_pixel);
         renderer().set_linear_light(s.linear_light);
         renderer().set_tonemap(s.tonemap_curve);
-        renderer().set_volumetric(s.volumetric);
         renderer().set_surface_relief(s.surface_relief);
         renderer().set_field_of_view(s.field_of_view);
         renderer().set_accurate_specular(s.accurate_specular, s.fresnel);

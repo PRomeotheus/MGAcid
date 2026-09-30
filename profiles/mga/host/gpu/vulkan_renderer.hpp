@@ -116,10 +116,6 @@ public:
     // the film curve to apply: zero is linear shading with a plain clip, and
     // 0.47 leaves a mid grey where the old path had it.
     void set_linear_light(bool enabled);
-    // Light scattered out of the air between the eye and the scene, marched
-    // through the shadow map. Needs a casting light, so it follows the shadow
-    // setting being on.
-    void set_volumetric(float strength);
     // Read a texture's own light and dark as relief, and light it accordingly.
     // Works only alongside per-pixel lighting, which is where it is applied.
     void set_surface_relief(float strength);
@@ -133,7 +129,6 @@ public:
     // Scales the light before the tonemap, so there is something above one for
     // the curve to work on, and dithers the result against banding.
     void set_light_intensity(float intensity, float dither);
-    [[nodiscard]] bool volumetric_available() const noexcept;
     void set_tonemap(float curve);
     void set_sharp_screen(bool sharp);
     void set_sharp_textures(bool sharp);

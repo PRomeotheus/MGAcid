@@ -189,22 +189,6 @@ struct AoPush {
 static_assert(sizeof(AoPush) == 32u, "AoPush must match ao.frag's push block");
 static_assert(offsetof(AoPush, depth) == 16u, "ao.frag reads depth at offset 16");
 
-// What the volumetric pass needs. A mat4 is 16-byte aligned like a vec4, so
-// nothing has to be nudged here, but the offsets are asserted anyway: this
-// block is close to the 128 bytes Vulkan guarantees, and a silent gap would
-// push it over on exactly the hardware that offers no more.
-struct VolumetricPush {
-    alignas(16) std::array<float, 16> clip_to_light{};
-    alignas(16) std::array<float, 4> inverse_w{};
-    alignas(16) std::array<float, 4> params{};
-    alignas(16) std::array<float, 4> light_color{};
-};
-static_assert(sizeof(VolumetricPush) == 112u, "VolumetricPush must match volumetric.frag's push block");
-static_assert(offsetof(VolumetricPush, inverse_w) == 64u, "volumetric.frag reads inverse_w at 64");
-static_assert(offsetof(VolumetricPush, params) == 80u, "volumetric.frag reads params at 80");
-static_assert(offsetof(VolumetricPush, light_color) == 96u, "volumetric.frag reads light_color at 96");
-static_assert(sizeof(VolumetricPush) <= 128u, "Vulkan only guarantees 128 bytes of push constants");
-
 // Floor reflections, at the seam.
 struct ReflectPush {
     alignas(16) std::array<float, 16> clip_to_world{};
@@ -1021,21 +1005,6 @@ struct VulkanRenderer::Impl {
     VkRenderPass ao_render_pass{};
     VkShaderModule ao_vertex_shader{};
     VkShaderModule ao_fragment_shader{};
-    // The volumetric pass shares the occlusion pass's render pass and its
-    // framebuffers: same single colour attachment, loaded and stored, same
-    // layouts either side. Only the pipeline and the bindings differ.
-    VkDescriptorSetLayout volumetric_set_layout{};
-    VkPipelineLayout volumetric_pipeline_layout{};
-    VkPipeline volumetric_pipeline{};
-    VkShaderModule volumetric_fragment_shader{};
-    // Keyed on both views, so a change of shadow map makes a new set rather
-    // than rewriting one a queued frame may still be reading.
-    std::map<std::pair<VkImageView, VkImageView>, VkDescriptorSet> volumetric_descriptors;
-    float volumetric_strength{};
-    std::uint32_t volumetric_steps{24u};
-    // The casting light's diffuse colour, normalised, kept when the
-    // environment is built because the seam has no draw state to read it from.
-    std::array<float, 4> shadow_light_color{1.0f, 1.0f, 1.0f, 0.0f};
     // The last 3D draw's world-to-clip, kept because the seam happens during a
     // 2D draw, by which time the call being recorded has a flat transform.
     std::array<float, 16> scene_view_projection{};
@@ -1108,9 +1077,6 @@ struct VulkanRenderer::Impl {
     float reflect_strength{};
     std::uint32_t reflect_steps{24u};
     bool create_ao_pipeline(std::string &error);
-    bool create_volumetric_pipeline(std::string &error);
-    [[nodiscard]] bool volumetric_available() const noexcept { return volumetric_pipeline != VK_NULL_HANDLE; }
-    [[nodiscard]] VkDescriptorSet volumetric_descriptor_for(VkImageView depth, VkImageView shadow);
     void drop_ao_resources();
     [[nodiscard]] bool ao_available() const noexcept { return ao_pipeline != VK_NULL_HANDLE; }
     [[nodiscard]] VkDescriptorSet ao_descriptor_for(VkImageView depth);
@@ -1677,13 +1643,10 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
     impl.pixel_perfect = player.pixel_perfect;
     impl.light_per_pixel = player.light_per_pixel;
     impl.linear_light = player.linear_light;
-    impl.volumetric_strength = std::clamp(player.volumetric, 0.0f, 1.0f);
     // More steps trade frame time for less of the march showing. Left as an
     // environment variable rather than a menu row: the default is a reasonable
     // place to sit, and this is the knob to reach for if the weave shows on a
     // particular scene.
-    if (const char *steps = std::getenv("MGA_VOLUMETRIC_STEPS"))
-        impl.volumetric_steps = static_cast<std::uint32_t>(std::clamp(std::atoi(steps), 4, 64));
     impl.tonemap_curve = std::clamp(player.tonemap_curve, 0.0f, 4.0f);
     impl.surface_relief = std::clamp(player.surface_relief, 0.0f, 8.0f);
     impl.field_of_view = std::clamp(player.field_of_view, 0.8f, 1.6f);
@@ -1706,7 +1669,7 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
     impl.dof_strength = std::clamp(player.depth_of_field, 0.0f, 1.0f);
     impl.reflect_strength = std::clamp(player.reflections, 0.0f, 1.0f);
     // More steps find a reflection further along the floor and cost a texture
-    // read apiece. Left as an environment variable, like the volumetric step
+    // read apiece. Left as an environment variable, like the other step
     // count: the default sits in a reasonable place and this is the knob for
     // when a particular room needs one.
     if (const char *steps = std::getenv("MGA_REFLECT_STEPS"))
@@ -1963,10 +1926,8 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
                              // and the colour grading table.
                              // maxSets below counts sets, this counts descriptors,
                              // and the two agree only for a one-binding layout.
-                             // The volumetric sets are two apiece as well: the
-                             // depth the world left, and the light's own map.
                              static_cast<std::uint32_t>(kTextureDescriptorSets + 1u + kMaxFramebufferTextureSets +
-                                                        3u * kMaxPostSets + kMaxAoSets + 2u * kMaxAoSets + 2u * kMaxAoSets + 1u)},
+                                                        3u * kMaxPostSets + kMaxAoSets + 2u * kMaxAoSets + 1u)},
         VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 2u},
     };
     VkDescriptorPoolCreateInfo pool_info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
@@ -2033,13 +1994,6 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
     std::string reflect_error;
     if (!impl.create_reflect_pipeline(reflect_error))
         std::cout << "[render] reflections unavailable: " << reflect_error << "\n";
-
-    // Shares that pass's render pass, so it can only be built once that one is,
-    // and a failure here is not fatal either: the shafts simply stay off.
-    if (!impl.create_volumetric_pipeline(error)) {
-        std::cout << "[render] volumetric light unavailable: " << error << "\n";
-        error.clear();
-    }
 
     VkSamplerCreateInfo sampler_info{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
     sampler_info.magFilter = VK_FILTER_LINEAR;
@@ -2771,8 +2725,7 @@ bool VulkanRenderer::Impl::create_ao_pipeline(std::string &error) {
 }
 
 void VulkanRenderer::Impl::drop_ao_resources() {
-    if (ao_framebuffers.empty() && ao_descriptors.empty() && volumetric_descriptors.empty() &&
-        seam_read_descriptors.empty())
+    if (ao_framebuffers.empty() && ao_descriptors.empty() && seam_read_descriptors.empty())
         return;
     // Rare -- a target rebuilt, or the internal resolution changed -- so
     // waiting is cheaper than tracking which frame last used each one.
@@ -2787,13 +2740,6 @@ void VulkanRenderer::Impl::drop_ao_resources() {
         if (set != VK_NULL_HANDLE) vkFreeDescriptorSets(device, descriptor_pool, 1u, &set);
     }
     ao_descriptors.clear();
-    // The volumetric sets come from the same pool and are keyed on the same
-    // depth views, so they go the same way at the same time.
-    for (auto &[views, set] : volumetric_descriptors) {
-        (void)views;
-        if (set != VK_NULL_HANDLE) vkFreeDescriptorSets(device, descriptor_pool, 1u, &set);
-    }
-    volumetric_descriptors.clear();
     // Same pool, same depth views, and they also hold the blur image's view,
     // which is rebuilt whenever the target extent changes.
     for (auto &[view, set] : seam_read_descriptors) {
@@ -2945,18 +2891,12 @@ VkDescriptorSet VulkanRenderer::Impl::seam_read_descriptor_for(VkImageView depth
 void VulkanRenderer::Impl::record_scene_ao(Target &target) {
     if (ao_render_pass == VK_NULL_HANDLE || target.depth_view == VK_NULL_HANDLE) return;
     const bool want_ao = ao_available() && post_ao > 0.0f;
-    // The shafts need somewhere for the light to come from, so they need the
-    // same map the shadows use and go quiet when there is none.
-    const bool casting =
-        shadow_available && shadow_strength > 0.0f && shadow_map != nullptr && shadow_map->view() != VK_NULL_HANDLE;
-    const bool want_volumetric =
-        volumetric_available() && volumetric_strength > 0.0f && casting && scene_view_projection_valid;
     const bool want_dof = dof_available() && dof_strength > 0.0f;
-    // Reflections need a projection to rebuild world positions with, the same
-    // one the shafts use and with the same caveat: it is the last 3D draw's,
-    // and the GE changes projection from draw to draw.
+    // Reflections need a projection to rebuild world positions with, and the
+    // caveat that comes with it: it is the last 3D draw's, and the GE changes
+    // projection from draw to draw.
     const bool want_reflect = reflect_available() && reflect_strength > 0.0f && scene_view_projection_valid;
-    if (!want_ao && !want_volumetric && !want_dof && !want_reflect) return;
+    if (!want_ao && !want_dof && !want_reflect) return;
     const VkFramebuffer framebuffer = ao_framebuffer_for(target);
     const VkDescriptorSet set = want_ao ? ao_descriptor_for(target.depth_view) : VK_NULL_HANDLE;
     if (framebuffer == VK_NULL_HANDLE || (want_ao && set == VK_NULL_HANDLE)) return;
@@ -2999,36 +2939,6 @@ void VulkanRenderer::Impl::record_scene_ao(Target &target) {
                                 nullptr);
         vkCmdPushConstants(command_buffer, ao_pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0u, sizeof(push), &push);
         vkCmdDraw(command_buffer, 3u, 1u, 0u, 0u);
-    }
-    // Second draw, same pass and same framebuffer: the occlusion has darkened
-    // the world and the shafts now add light back into the air above it. Doing
-    // it the other way round would let the crease darkening eat the shafts.
-    if (want_volumetric) {
-        if (const VkDescriptorSet scatter_set =
-                volumetric_descriptor_for(target.depth_view, shadow_map->view());
-            scatter_set != VK_NULL_HANDLE) {
-            std::array<float, 16> inverse{};
-            if (invert(scene_view_projection, inverse)) {
-                VolumetricPush scatter{};
-                scatter.clip_to_light = multiply(shadow_light_transform, inverse);
-                // The row that gives w, in the column-major order multiply()
-                // works in: element (3, column) is at [column * 4 + 3].
-                scatter.inverse_w = {inverse[3], inverse[7], inverse[11], inverse[15]};
-                // The golden ratio walks the dither phase across frames
-                // without ever repeating a short cycle, so the sampling noise
-                // moves instead of sitting still in the same places.
-                scatter.params = {volumetric_strength, static_cast<float>(volumetric_steps),
-                                  depth_reversed ? 1.0f : 0.0f,
-                                  static_cast<float>(frames % 256u) * 0.618034f};
-                scatter.light_color = shadow_light_color;
-                vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, volumetric_pipeline);
-                vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, volumetric_pipeline_layout,
-                                        0u, 1u, &scatter_set, 0u, nullptr);
-                vkCmdPushConstants(command_buffer, volumetric_pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0u,
-                                   sizeof(scatter), &scatter);
-                vkCmdDraw(command_buffer, 3u, 1u, 0u, 0u);
-            }
-        }
     }
     // Reflections before the defocus, so that a reflection on a floor that is
     // out of focus is blurred along with the floor it is on. The other way
@@ -3246,140 +3156,6 @@ bool VulkanRenderer::Impl::create_reflect_pipeline(std::string &error) {
 // skipped when that one did not come up. Two pipelines sharing a render pass is
 // ordinary -- they only have to agree on the attachments, which they do, being
 // the same single colour attachment loaded and stored.
-bool VulkanRenderer::Impl::create_volumetric_pipeline(std::string &error) {
-    if (ao_render_pass == VK_NULL_HANDLE) return true;
-
-    VkShaderModuleCreateInfo module_info{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
-    module_info.codeSize = sizeof(kVolumetricFragmentShader);
-    module_info.pCode = kVolumetricFragmentShader;
-    if (!check(vkCreateShaderModule(device, &module_info, nullptr, &volumetric_fragment_shader),
-               "vkCreateShaderModule", error))
-        return false;
-
-    // Depth, and the light's own map.
-    std::array<VkDescriptorSetLayoutBinding, 2> bindings{};
-    for (std::uint32_t i = 0; i < bindings.size(); ++i) {
-        bindings[i].binding = i;
-        bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        bindings[i].descriptorCount = 1u;
-        bindings[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-    }
-    VkDescriptorSetLayoutCreateInfo layout_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    layout_info.bindingCount = static_cast<std::uint32_t>(bindings.size());
-    layout_info.pBindings = bindings.data();
-    if (!check(vkCreateDescriptorSetLayout(device, &layout_info, nullptr, &volumetric_set_layout),
-               "vkCreateDescriptorSetLayout", error))
-        return false;
-
-    VkPushConstantRange push_range{VK_SHADER_STAGE_FRAGMENT_BIT, 0u, sizeof(VolumetricPush)};
-    VkPipelineLayoutCreateInfo pipeline_layout_info{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-    pipeline_layout_info.setLayoutCount = 1u;
-    pipeline_layout_info.pSetLayouts = &volumetric_set_layout;
-    pipeline_layout_info.pushConstantRangeCount = 1u;
-    pipeline_layout_info.pPushConstantRanges = &push_range;
-    if (!check(vkCreatePipelineLayout(device, &pipeline_layout_info, nullptr, &volumetric_pipeline_layout),
-               "vkCreatePipelineLayout", error))
-        return false;
-
-    std::array<VkPipelineShaderStageCreateInfo, 2> stages{};
-    stages[0] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
-    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-    stages[0].module = ao_vertex_shader;  // the same fullscreen triangle
-    stages[0].pName = "main";
-    stages[1] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
-    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-    stages[1].module = volumetric_fragment_shader;
-    stages[1].pName = "main";
-
-    VkPipelineVertexInputStateCreateInfo vertex_input{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
-    VkPipelineInputAssemblyStateCreateInfo assembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
-    assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-    VkPipelineViewportStateCreateInfo viewport_state{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
-    viewport_state.viewportCount = 1u;
-    viewport_state.scissorCount = 1u;
-    VkPipelineRasterizationStateCreateInfo raster{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
-    raster.polygonMode = VK_POLYGON_MODE_FILL;
-    raster.cullMode = VK_CULL_MODE_NONE;
-    raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-    raster.lineWidth = 1.0f;
-    VkPipelineMultisampleStateCreateInfo multisample{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
-    multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-    VkPipelineDepthStencilStateCreateInfo depth{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
-    // Light scattered out of the air arrives on top of what is already in the
-    // target rather than tinting it, so this adds where the occlusion pass
-    // multiplies. But a plain add is wrong here for a reason worth writing
-    // down: by the time this runs, a scene shaded in linear space has already
-    // been through the tonemap and been encoded, so anything added now is
-    // added in display values and clips flat at white -- which undoes, in the
-    // brightest part of the picture, exactly the rolloff the curve exists to
-    // provide. Scaling the source by what the target has left over instead
-    // gives dst + src * (1 - dst): still additive where the picture is dark,
-    // where the shafts belong, and asymptotic to white rather than clamped at
-    // it. Alpha is left alone, as there, because the game reads some targets
-    // back.
-    VkPipelineColorBlendAttachmentState blend{};
-    blend.blendEnable = VK_TRUE;
-    blend.srcColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR;
-    blend.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
-    blend.colorBlendOp = VK_BLEND_OP_ADD;
-    blend.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
-    blend.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-    blend.alphaBlendOp = VK_BLEND_OP_ADD;
-    blend.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT;
-    VkPipelineColorBlendStateCreateInfo blending{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
-    blending.attachmentCount = 1u;
-    blending.pAttachments = &blend;
-    const std::array<VkDynamicState, 2> dynamic_states{VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
-    VkPipelineDynamicStateCreateInfo dynamic{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
-    dynamic.dynamicStateCount = static_cast<std::uint32_t>(dynamic_states.size());
-    dynamic.pDynamicStates = dynamic_states.data();
-
-    VkGraphicsPipelineCreateInfo info{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
-    info.stageCount = static_cast<std::uint32_t>(stages.size());
-    info.pStages = stages.data();
-    info.pVertexInputState = &vertex_input;
-    info.pInputAssemblyState = &assembly;
-    info.pViewportState = &viewport_state;
-    info.pRasterizationState = &raster;
-    info.pMultisampleState = &multisample;
-    info.pDepthStencilState = &depth;
-    info.pColorBlendState = &blending;
-    info.pDynamicState = &dynamic;
-    info.layout = volumetric_pipeline_layout;
-    info.renderPass = ao_render_pass;
-    return check(vkCreateGraphicsPipelines(device, pipeline_cache, 1u, &info, nullptr, &volumetric_pipeline),
-                 "vkCreateGraphicsPipelines", error);
-}
-
-VkDescriptorSet VulkanRenderer::Impl::volumetric_descriptor_for(VkImageView depth, VkImageView shadow) {
-    if (depth == VK_NULL_HANDLE || shadow == VK_NULL_HANDLE) return VK_NULL_HANDLE;
-    const auto key = std::make_pair(depth, shadow);
-    const auto found = volumetric_descriptors.find(key);
-    if (found != volumetric_descriptors.end()) return found->second;
-    if (volumetric_descriptors.size() >= kMaxAoSets) drop_ao_resources();
-    VkDescriptorSetAllocateInfo allocate{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-    allocate.descriptorPool = descriptor_pool;
-    allocate.descriptorSetCount = 1u;
-    allocate.pSetLayouts = &volumetric_set_layout;
-    VkDescriptorSet set = VK_NULL_HANDLE;
-    if (vkAllocateDescriptorSets(device, &allocate, &set) != VK_SUCCESS) return VK_NULL_HANDLE;
-    const std::array<VkDescriptorImageInfo, 2> images{
-        VkDescriptorImageInfo{clamp_sharp_sampler, depth, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-        VkDescriptorImageInfo{clamp_sharp_sampler, shadow, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
-    std::array<VkWriteDescriptorSet, 2> writes{};
-    for (std::uint32_t i = 0; i < writes.size(); ++i) {
-        writes[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-        writes[i].dstSet = set;
-        writes[i].dstBinding = i;
-        writes[i].descriptorCount = 1u;
-        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        writes[i].pImageInfo = &images[i];
-    }
-    vkUpdateDescriptorSets(device, static_cast<std::uint32_t>(writes.size()), writes.data(), 0u, nullptr);
-    volumetric_descriptors.emplace(key, set);
-    return set;
-}
-
 // Vulkan's own header on a cache blob: length, version, then the vendor,
 // device and a driver-specific id. A driver is required to ignore data it does
 // not recognise, but checking first means a cache from another machine or
@@ -5197,14 +4973,6 @@ void VulkanRenderer::set_surface_relief(float strength) {
     impl_->environment_version = 0u;
 }
 
-void VulkanRenderer::set_volumetric(float strength) {
-    if (impl_) impl_->volumetric_strength = std::clamp(strength, 0.0f, 1.0f);
-}
-
-bool VulkanRenderer::volumetric_available() const noexcept {
-    return impl_ != nullptr && impl_->volumetric_available();
-}
-
 void VulkanRenderer::set_tonemap(float curve) {
     if (impl_ == nullptr) return;
     impl_->tonemap_curve = std::clamp(curve, 0.0f, 4.0f);
@@ -5610,11 +5378,8 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     // world and only the world, and everything from here on paints over the
     // result rather than being shaded by it. Once per frame, and only when
     // something 3D was actually drawn -- a menu has no creases.
-    // Either effect brings the pass about; record_scene_ao decides which of the
-    // two draws it actually makes.
-    if (call.through && !impl.ao_seam_passed && impl.frame_transformed_draws != 0u &&
-        ((impl.post_ao > 0.0f && impl.ao_available()) ||
-         (impl.volumetric_strength > 0.0f && impl.volumetric_available()))) {
+    if (call.through && !impl.ao_seam_passed && impl.frame_transformed_draws != 0u && impl.post_ao > 0.0f &&
+        impl.ao_available()) {
         impl.ao_seam_passed = true;
         std::string target_error;
         if (Impl::Target *scene = impl.target_for(impl.current_target, target_error);
@@ -5889,7 +5654,7 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
         ++impl.frame_through_draws;
     } else {
         ++impl.frame_transformed_draws;
-        // World to clip for this frame, for the volumetric pass to invert. The
+        // World to clip for this frame, for the reflection pass to invert. The
         // world matrix is deliberately left out: it is per draw, and what that
         // pass needs is the part every draw shares.
         if (!call.clear_mode) {
@@ -6086,25 +5851,6 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
         if (!impl.write_uniform(&environment, sizeof(environment), impl.environment_offset)) {
             impl.note_drop("environment block");
             return;
-        }
-        // Kept for the volumetric pass, which runs at the seam and has no
-        // draw state left to read it from. Normalised to its brightest
-        // channel so the setting decides how strong the shafts are and the
-        // light only decides their colour -- otherwise a dim light would make
-        // them vanish and the strength row would appear not to work.
-        if (impl.shadow_light >= 0 && impl.shadow_light < 4) {
-            const std::array<float, 4> &diffuse = environment.light_diffuse[impl.shadow_light];
-            const float peak = std::max({diffuse[0], diffuse[1], diffuse[2]});
-            impl.shadow_light_color = peak > 0.0001f
-                                          ? std::array<float, 4>{diffuse[0] / peak, diffuse[1] / peak,
-                                                                 diffuse[2] / peak, 0.0f}
-                                          : std::array<float, 4>{1.0f, 1.0f, 1.0f, 0.0f};
-        } else {
-            // No light of the game's own behind the shadow, so the shafts take
-            // the colour of the port's own sun, which is white. Set rather
-            // than left alone: this survives between frames, and a tint from
-            // some earlier scene is not this scene's answer.
-            impl.shadow_light_color = {1.0f, 1.0f, 1.0f, 0.0f};
         }
         impl.environment_version = call.environment_version;
     }
@@ -6887,10 +6633,6 @@ void VulkanRenderer::shutdown() {
     vkDestroyPipelineLayout(impl.device, impl.dof_pipeline_layout, nullptr);
     vkDestroyShaderModule(impl.device, impl.dof_fragment_shader, nullptr);
     vkDestroyDescriptorSetLayout(impl.device, impl.seam_read_layout, nullptr);
-    vkDestroyPipeline(impl.device, impl.volumetric_pipeline, nullptr);
-    vkDestroyPipelineLayout(impl.device, impl.volumetric_pipeline_layout, nullptr);
-    vkDestroyDescriptorSetLayout(impl.device, impl.volumetric_set_layout, nullptr);
-    vkDestroyShaderModule(impl.device, impl.volumetric_fragment_shader, nullptr);
     vkDestroyPipeline(impl.device, impl.ao_pipeline, nullptr);
     vkDestroyPipelineLayout(impl.device, impl.ao_pipeline_layout, nullptr);
     vkDestroyDescriptorSetLayout(impl.device, impl.ao_set_layout, nullptr);

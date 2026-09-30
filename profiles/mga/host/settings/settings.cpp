@@ -56,10 +56,15 @@ std::string format_float(float value) {
     return text;
 }
 
-// Flags the host has always read as "set means on", whatever the value.
-bool variable_present(const char *) { return true; }
-
-// Flags read the way the pad code reads them: 0, no, off and false are off.
+// Every flag is read the same way: 0, no, off and false turn it off, anything
+// else turns it on.
+//
+// Nine of them used to ignore their value entirely and mean "on" whenever the
+// variable was set at all, while seven honoured it, and nothing said which was
+// which. That is worse than either rule on its own: MGA_SMOOTH=off switched
+// frame smoothing ON, so every attempt to rule smoothing out of a fault was
+// testing it with smoothing enabled, and read as evidence that smoothing was
+// innocent. Two separate investigations went the wrong way on that.
 bool variable_flag(const char *text) {
     for (const char *off : {"0", "no", "off", "false"})
         if (std::strcmp(text, off) == 0) return false;
@@ -134,7 +139,7 @@ const std::vector<Field> &fields() {
         {"video.smooth_textures", "MGA_SMOOTH_TEXTURES",
          [](Settings &s, const std::string &t) { return parse_bool(t, s.smooth_textures); },
          [](const Settings &s) { return std::string(s.smooth_textures ? "1" : "0"); },
-         [](Settings &s, const char *t) { s.smooth_textures = variable_present(t); }},
+         [](Settings &s, const char *t) { s.smooth_textures = variable_flag(t); }},
         {"video.texture_scale", "MGA_TEXTURE_SCALE",
          [](Settings &s, const std::string &t) { return parse_uint(t, 1u, kMaxTextureScale, s.texture_scale); },
          [](const Settings &s) { return std::to_string(s.texture_scale); },
@@ -142,7 +147,7 @@ const std::vector<Field> &fields() {
         {"video.texture_scale_sharp", "MGA_TEXTURE_SCALE_SHARP",
          [](Settings &s, const std::string &t) { return parse_bool(t, s.texture_scale_sharp); },
          [](const Settings &s) { return std::string(s.texture_scale_sharp ? "1" : "0"); },
-         [](Settings &s, const char *t) { s.texture_scale_sharp = variable_present(t); }},
+         [](Settings &s, const char *t) { s.texture_scale_sharp = variable_flag(t); }},
         {"video.post_process", "MGA_POST_PROCESS",
          [](Settings &s, const std::string &t) { return parse_bool(t, s.post_process); },
          [](const Settings &s) { return std::string(s.post_process ? "1" : "0"); },
@@ -162,7 +167,7 @@ const std::vector<Field> &fields() {
         {"video.linear_light", "MGA_LINEAR_LIGHT",
          [](Settings &s, const std::string &t) { return parse_bool(t, s.linear_light); },
          [](const Settings &s) { return std::string(s.linear_light ? "1" : "0"); },
-         [](Settings &s, const char *t) { s.linear_light = variable_present(t); }},
+         [](Settings &s, const char *t) { s.linear_light = variable_flag(t); }},
         {"video.tonemap_curve", "MGA_TONEMAP_CURVE",
          [](Settings &s, const std::string &t) { return parse_float(t, 0.0f, 4.0f, s.tonemap_curve); },
          [](const Settings &s) { return format_float(s.tonemap_curve); },
@@ -170,7 +175,7 @@ const std::vector<Field> &fields() {
         {"video.accurate_specular", "MGA_ACCURATE_SPECULAR",
          [](Settings &s, const std::string &t) { return parse_bool(t, s.accurate_specular); },
          [](const Settings &s) { return std::string(s.accurate_specular ? "1" : "0"); },
-         [](Settings &s, const char *t) { s.accurate_specular = variable_present(t); }},
+         [](Settings &s, const char *t) { s.accurate_specular = variable_flag(t); }},
         {"video.fresnel", "MGA_FRESNEL",
          [](Settings &s, const std::string &t) { return parse_float(t, 0.0f, 4.0f, s.fresnel); },
          [](const Settings &s) { return format_float(s.fresnel); },
@@ -190,11 +195,11 @@ const std::vector<Field> &fields() {
         {"video.fast_loading", "MGA_FAST_LOADING",
          [](Settings &s, const std::string &t) { return parse_bool(t, s.fast_loading); },
          [](const Settings &s) { return std::string(s.fast_loading ? "1" : "0"); },
-         [](Settings &s, const char *t) { s.fast_loading = variable_present(t); }},
+         [](Settings &s, const char *t) { s.fast_loading = variable_flag(t); }},
         {"video.field_of_view", "MGA_FIELD_OF_VIEW",
-         [](Settings &s, const std::string &t) { return parse_float(t, 0.8f, 1.1f, s.field_of_view); },
+         [](Settings &s, const std::string &t) { return parse_float(t, 0.8f, 1.6f, s.field_of_view); },
          [](const Settings &s) { return format_float(s.field_of_view); },
-         [](Settings &s, const char *t) { (void)parse_float(t, 0.8f, 1.1f, s.field_of_view); }},
+         [](Settings &s, const char *t) { (void)parse_float(t, 0.8f, 1.6f, s.field_of_view); }},
         {"video.surface_relief", "MGA_SURFACE_RELIEF",
          [](Settings &s, const std::string &t) { return parse_float(t, 0.0f, 8.0f, s.surface_relief); },
          [](const Settings &s) { return format_float(s.surface_relief); },
@@ -202,15 +207,15 @@ const std::vector<Field> &fields() {
         {"video.light_per_pixel", "MGA_LIGHT_PER_PIXEL",
          [](Settings &s, const std::string &t) { return parse_bool(t, s.light_per_pixel); },
          [](const Settings &s) { return std::string(s.light_per_pixel ? "1" : "0"); },
-         [](Settings &s, const char *t) { s.light_per_pixel = variable_present(t); }},
+         [](Settings &s, const char *t) { s.light_per_pixel = variable_flag(t); }},
         {"video.pixel_perfect", "MGA_PIXEL_PERFECT",
          [](Settings &s, const std::string &t) { return parse_bool(t, s.pixel_perfect); },
          [](const Settings &s) { return std::string(s.pixel_perfect ? "1" : "0"); },
-         [](Settings &s, const char *t) { s.pixel_perfect = variable_present(t); }},
+         [](Settings &s, const char *t) { s.pixel_perfect = variable_flag(t); }},
         {"video.frame_smoothing", "MGA_SMOOTH",
          [](Settings &s, const std::string &t) { return parse_bool(t, s.frame_smoothing); },
          [](const Settings &s) { return std::string(s.frame_smoothing ? "1" : "0"); },
-         [](Settings &s, const char *t) { s.frame_smoothing = variable_present(t); }},
+         [](Settings &s, const char *t) { s.frame_smoothing = variable_flag(t); }},
         {"video.shadow_maps", "MGA_SHADOW_MAPS",
          [](Settings &s, const std::string &t) { return parse_float(t, 0.0f, 1.0f, s.shadow_maps); },
          [](const Settings &s) { return format_float(s.shadow_maps); },
@@ -256,7 +261,7 @@ const std::vector<Field> &fields() {
         {"video.unthrottled", "MGA_UNTHROTTLED",
          [](Settings &s, const std::string &t) { return parse_bool(t, s.unthrottled); },
          [](const Settings &s) { return std::string(s.unthrottled ? "1" : "0"); },
-         [](Settings &s, const char *t) { s.unthrottled = variable_present(t); }},
+         [](Settings &s, const char *t) { s.unthrottled = variable_flag(t); }},
         {"video.performance", "MGA_PERF",
          [](Settings &s, const std::string &t) { return kPerfDisplays.parse(t, s.perf); },
          [](const Settings &s) { return kPerfDisplays.format(s.perf); },

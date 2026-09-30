@@ -726,8 +726,10 @@ void Menu::audio() {
         settings::save();
     }
     int music = static_cast<int>(s.music_volume);
-    if (slider_row("Music and voice", music, 0, 100, 5, "%d%%",
-                   locked("audio.music_volume", "Loudness of the music and the recorded speech."))) {
+    // "Music" alone: this game has no recorded speech. The gain rides the
+    // ATRAC3 streams, and in Metal Gear Ac!d those carry the music.
+    if (slider_row("Music", music, 0, 100, 5, "%d%%",
+                   locked("audio.music_volume", "Loudness of the background music."))) {
         s.music_volume = static_cast<std::uint32_t>(music);
         audio::set_music_gain(static_cast<float>(s.music_volume) / 100.0f);
         settings::save();

@@ -1144,6 +1144,10 @@ void register_audio(HleRegistrar &hle) {
     // so it is worth four slots of state.
     static constexpr const char *kRevCalls[4] = {"__sceSasRevType", "__sceSasRevParam", "__sceSasRevEVOL",
                                                  "__sceSasRevVON"};
+    // Argument names, so the log says what each number is. A nullptr second
+    // name means the call takes one argument and the other register is stale.
+    static constexpr const char *kRevArgs[4][2] = {
+        {"type", nullptr}, {"delay", "feedback"}, {"left", "right"}, {"dry", "wet"}};
     for (std::size_t i = 0; i < 4u; ++i) {
         hle.add("sceSasCore", kRevCalls[i], [i](Runtime &, AllegrexContext &ctx) {
             // Signed: RevType uses -1 for OFF.
@@ -1161,8 +1165,12 @@ void register_audio(HleRegistrar &hle) {
                 last_b[i] = b;
                 // Capped: a game sweeping a send every frame must not fill the log.
                 if (printed[i]++ < 32) {
-                    std::cout << "[sas] " << kRevCalls[i] << "(" << a << ", " << b
-                              << ") -- reverb is accepted but not modelled\n";
+                    // RevType takes only a type, so its second register is
+                    // whatever was left there -- printing it invites exactly
+                    // the misreading it already caused once.
+                    std::cout << "[sas] " << kRevCalls[i] << "(" << kRevArgs[i][0] << "=" << a;
+                    if (kRevArgs[i][1] != nullptr) std::cout << ", " << kRevArgs[i][1] << "=" << b;
+                    std::cout << ") -- reverb is accepted but not modelled\n";
                 }
             }
             kernel().finish(ctx, 0u);

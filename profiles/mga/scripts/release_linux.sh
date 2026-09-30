@@ -33,7 +33,6 @@ app_id=io.github.teamgdb.Yakumo
 work="${YAKUMO_WORK:-$repo_dir/out/release-linux}"
 dist="$work/dist"
 stage="$work/stage/yakumo"
-expected_executable_sha256=55c0598436c0753b04331f8e95d406f832d9217806e3a896fed0e88b33637d8c
 
 version=""
 jobs=4
@@ -62,6 +61,19 @@ step() { printf '\n=== %s\n' "$*"; }
 fail() { echo "error: $*" >&2; exit 1; }
 
 sha256() { sha256sum "$1" | cut -d' ' -f1; }
+
+# The supported executable, read from the profile that defines it rather than
+# copied here. It WAS copied here, and the copy was Monster Hunter Portable
+# 3rd's: this script came from that profile and the constant came with it, so
+# the check rejected every genuine Metal Gear Ac!d build. Three places already
+# carry the right hash -- prepare_game.sh, and both constants in
+# game_identity.hpp -- and a fourth copy is what produced the bug, so this
+# reads one of them instead of adding another.
+game_identity="$profile_dir/host/install/game_identity.hpp"
+expected_executable_sha256="$(sed -n '/kExecutableSha256/,/;/p' "$game_identity" |
+    sed -n 's/.*"\([0-9a-f]\{64\}\)".*/\1/p' | head -1)"
+[[ -n "$expected_executable_sha256" ]] ||
+    fail "cannot read kExecutableSha256 from $game_identity"
 
 # The FFmpeg the build bundles, as pinned in cmake/FFmpeg.cmake.
 ffmpeg_cmake="$profile_dir/cmake/FFmpeg.cmake"

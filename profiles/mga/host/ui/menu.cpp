@@ -264,23 +264,6 @@ void Menu::video() {
         settings::save();
     }
     {
-        int field = static_cast<int>(std::lround(s.field_of_view * 100.0f));
-        RowOptions o = options_for(
-            "video.field_of_view",
-            "How much of the world fits on screen, as a percentage of what the game asks for. The field is widened "
-            "properly rather than by stretching the picture, so nothing changes shape: the aspect ratio the game "
-            "chose is kept and only how much fits changes. Ac!d places its camera itself, shot by shot, so this is "
-            "the one way to see more of a room without moving it.\n\n"
-            "Past about 110% the extra view may show where the game stopped drawing: it decides what to send "
-            "before this is applied, and it decides using its own field. Narrowing is always safe, since it only "
-            "ever shows less.");
-        if (slider_row("Field of view", field, 80, 160, 5, "%d%%", o)) {
-            s.field_of_view = static_cast<float>(field) / 100.0f;
-            renderer().set_field_of_view(s.field_of_view);
-            settings::save();
-        }
-    }
-    {
         RowOptions o = options_for(
             "video.fast_loading",
             "Lets the clock run ahead while the game loads. Reading the disc is instant here, but a load still takes "
@@ -805,7 +788,6 @@ void Menu::video() {
         renderer().set_linear_light(s.linear_light);
         renderer().set_tonemap(s.tonemap_curve);
         renderer().set_surface_relief(s.surface_relief);
-        renderer().set_field_of_view(s.field_of_view);
         renderer().set_accurate_specular(s.accurate_specular, s.fresnel);
         renderer().set_ambient_shape(s.ambient_shape);
         renderer().set_light_intensity(s.light_intensity, s.dither);

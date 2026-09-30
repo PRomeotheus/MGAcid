@@ -40,7 +40,6 @@ struct Settings {
     bool linear_light{};
     float tonemap_curve{0.47f};        // 0 linear and clipped .. 4 heavily filmic; 0.47 holds mid grey
     float surface_relief{};            // 0 off .. 8; texture shading read as relief; needs per-pixel lighting
-    float field_of_view{1.0f};         // 0.8 .. 1.6; multiplies the field of view the game asks for
     bool fast_loading{};               // let emulated time run ahead while the game loads and is silent
     bool accurate_specular{};          // a real view direction for highlights, and a Fresnel rim with it
     float fresnel{1.0f};               // 0 .. 4; how strong that rim is

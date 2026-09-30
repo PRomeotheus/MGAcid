@@ -498,31 +498,6 @@ constexpr float kShadowSoftness = 900.0f;
 // smears its shadow across the whole scene as a grey wash.
 constexpr float kShadowMaxRadiusTexels = 12.0f;
 
-// A projection with a wider or narrower field of view than the game asked for.
-//
-// A perspective matrix holds the cotangent of half the field in the diagonal
-// terms, so the field itself can be recovered and a new one put back rather
-// than the terms being scaled by some factor that only approximates it: at 1.3
-// a plain scale of the terms and a real widening differ by several degrees.
-// Both axes take the same factor, so the aspect ratio the game chose is kept
-// and only how much of the world fits changes.
-//
-// An orthographic projection is left alone. It has no field of view to widen,
-// and the two are told apart by the last term: zero on a perspective matrix,
-// one on an orthographic one. That test is what keeps this off the interface
-// and anything else the game lays out in two dimensions.
-std::array<float, 16> widen_field_of_view(const std::array<float, 16> &projection, float factor) {
-    if (factor == 1.0f || projection[15] != 0.0f || !(projection[5] > 0.0f)) return projection;
-    const float half = std::atan(1.0f / projection[5]);
-    const float widened = std::tan(std::clamp(half * factor, 0.02f, 1.45f));
-    if (!(widened > 0.0f)) return projection;
-    const float ratio = 1.0f / (widened * projection[5]);
-    std::array<float, 16> out = projection;
-    out[0] *= ratio;
-    out[5] *= ratio;
-    return out;
-}
-
 std::array<float, 16> multiply(const std::array<float, 16> &a, const std::array<float, 16> &b) {
     std::array<float, 16> result{};
     for (std::uint32_t column = 0; column < 4u; ++column) {
@@ -841,7 +816,6 @@ struct VulkanRenderer::Impl {
     float surface_relief{};
     // How much wider than the game's own the field of view is made; 1 is the
     // game's.
-    float field_of_view{1.0f};
     bool accurate_specular{};
     float light_intensity{1.0f};
     float ambient_shape{};
@@ -1021,11 +995,6 @@ struct VulkanRenderer::Impl {
     // ran there -- a frame that draws 3D and flips without ever drawing a flat
     // one never reaches the seam, and falls back to the post pass.
     bool ao_seam_passed{};
-    // Set at the first two-dimensional draw that follows a transformed one,
-    // which is where the world stops and the interface begins. Unlike
-    // ao_seam_passed this is kept whether or not any screen-space effect is
-    // switched on, because the field-of-view control needs it every frame.
-    bool hud_started{};
     bool ao_in_scene{};
 
     // A half-size copy of the finished world, taken at the seam. The seam
@@ -1649,7 +1618,6 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
     // particular scene.
     impl.tonemap_curve = std::clamp(player.tonemap_curve, 0.0f, 4.0f);
     impl.surface_relief = std::clamp(player.surface_relief, 0.0f, 8.0f);
-    impl.field_of_view = std::clamp(player.field_of_view, 0.8f, 1.6f);
     impl.accurate_specular = player.accurate_specular;
     impl.light_intensity = std::clamp(player.light_intensity, 0.25f, 8.0f);
     impl.ambient_shape = std::clamp(player.ambient_shape, 0.0f, 1.0f);
@@ -4961,10 +4929,6 @@ void VulkanRenderer::set_light_intensity(float intensity, float dither) {
     impl_->environment_version = 0u;
 }
 
-void VulkanRenderer::set_field_of_view(float factor) {
-    if (impl_) impl_->field_of_view = std::clamp(factor, 0.8f, 1.6f);
-}
-
 void VulkanRenderer::set_surface_relief(float strength) {
     if (impl_ == nullptr) return;
     impl_->surface_relief = std::clamp(strength, 0.0f, 8.0f);
@@ -5297,7 +5261,6 @@ void VulkanRenderer::begin_frame() {
     // Read again at present time, after the per-frame counters have been
     // cleared, so they are reset here rather than there.
     impl.ao_seam_passed = false;
-    impl.hud_started = false;
     impl.ao_in_scene = false;
     impl.recording = true;
 }
@@ -5370,9 +5333,6 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     if (!impl.ready) return;
     if (!impl.recording) begin_frame();
     if (call.vertices.empty()) return;
-
-    // The world has ended and the interface has begun. See hud_started.
-    if (call.through && impl.frame_transformed_draws != 0u) impl.hud_started = true;
 
     // The same seam, for ambient occlusion: the depth buffer here describes the
     // world and only the world, and everything from here on paints over the
@@ -5939,35 +5899,7 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     if (pipeline == VK_NULL_HANDLE) return;
 
     PushConstants push{};
-    // The field of view is widened for the world and for nothing else.
-    //
-    // The orthographic test inside widen_field_of_view keeps it off anything
-    // laid out in two dimensions, which is most of the interface, but not off
-    // the parts of the interface that are drawn in perspective. The compass is
-    // one: the needle is real geometry seen through the camera's own
-    // projection, while the ring it turns inside is a flat sprite. Widen that
-    // projection and the needle swings in towards the middle of the screen
-    // while its ring stays put, so at anything above 100% the needle leaves
-    // its own dial -- which is what it was doing.
-    //
-    // Telling the two apart by the matrix does not work, because the compass
-    // is drawn through the same matrix as the room. What does tell them apart
-    // is when they are drawn: the game finishes the world, then paints the
-    // interface over it. So the widening stops at that seam. MGA_FOV_EVERYWHERE
-    // restores the old behaviour, which is worth having if some scene turns out
-    // to go back to drawing the world after the interface has started.
-    // ...and not on a screen that is not the game world.
-    //
-    // A wider field of view shows more of the world than the artist put
-    // geometry in. In a room that does not matter, because the room continues
-    // past the edge of the frame. On the map screen the backdrop is one finite
-    // piece of geometry with nothing behind it, so widening the view slides
-    // its edge into frame and what is beyond it is a black wedge -- one that
-    // changes shape as the camera turns, because the edge turns with it.
-    static const bool fov_everywhere = std::getenv("MGA_FOV_EVERYWHERE") != nullptr;
-    const bool widen = (!impl.hud_started && impl.in_game_scene) || fov_everywhere;
-    push.transform =
-        multiply(widen ? widen_field_of_view(call.projection, impl.field_of_view) : call.projection, view_world);
+    push.transform = multiply(call.projection, view_world);
     push.viewport = {static_cast<float>(kPspWidth), static_cast<float>(kPspHeight), call.through ? 1.0f : 0.0f,
                      (fogged ? kPushFog : 0.0f) + (lit ? kPushLighting : 0.0f) +
                          (impl.light_per_pixel && impl.in_game_scene ? kPushLightPerPixel : 0.0f) +

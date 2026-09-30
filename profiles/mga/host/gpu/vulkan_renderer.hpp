@@ -119,8 +119,6 @@ public:
     // Read a texture's own light and dark as relief, and light it accordingly.
     // Works only alongside per-pixel lighting, which is where it is applied.
     void set_surface_relief(float strength);
-    // Multiplies the field of view the game asks for. 1 is the game's own.
-    void set_field_of_view(float factor);
     // A real viewing direction for the specular half vector, and a Schlick
     // Fresnel term that needs one.
     void set_accurate_specular(bool enabled, float fresnel);

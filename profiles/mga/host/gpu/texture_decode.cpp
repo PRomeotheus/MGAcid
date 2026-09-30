@@ -377,7 +377,16 @@ std::uint64_t texture_key(const GuestMemory &memory, const TextureState &texture
     // rather than a palette, so it is clamped. This is memoised for the
     // display list being walked, so it is paid once per texture per list
     // rather than once per draw.
-    if (indexed && texture.clut_address != 0u) {
+    // MGA_CLUT_KEY=0 leaves the palette's contents out, which is what the key
+    // did before palette variants were found sharing one entry. It is here to
+    // settle, in one run, whether a fault is this hash's doing: with it off the
+    // key is the old one in every respect but the indexing fields, which are
+    // three integers and cannot cost anything.
+    static const bool hash_clut = [] {
+        const char *text = std::getenv("MGA_CLUT_KEY");
+        return text == nullptr || *text != '0';
+    }();
+    if (indexed && hash_clut && texture.clut_address != 0u) {
         const std::uint32_t entry_bytes = texture.clut_format == 3u ? 4u : 2u;
         // The largest entry this texture can actually reach, which is
         // read_clut()'s own formula applied to the largest index the format

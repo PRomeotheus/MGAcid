@@ -87,6 +87,10 @@ void main() {
                          + push.params.w);
 
     float reached = 0.0;
+    // How many samples landed inside the light's box at all, and how many of
+    // those were in shadow. A shaft is lit air with unlit air beside it, and
+    // without the second number there is no way to tell one from a sky.
+    float inside = 0.0;
     for (int i = 0; i < steps; ++i) {
         float t = (float(i) + dither) / float(steps);
         vec4 point = mix(light_near, light_far, t);
@@ -99,9 +103,27 @@ void main() {
         // scene and hide the shafts inside it.
         if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) continue;
         if (projected.z < 0.0 || projected.z > 1.0) continue;
+        inside += 1.0;
         reached += projected.z <= texture(shadow_map, uv).r ? 1.0 : 0.0;
     }
 
-    float scatter = reached / float(steps) * push.params.x;
+    // A ray with nothing in its way contributes nothing.
+    //
+    // The note above about the box being only as big as the casters stopped
+    // being true: it is deliberately sized to hold every caster in the level,
+    // so that characters cast wherever they are. That leaves nearly every
+    // sample of air inside it and lit, and the lit fraction alone is then
+    // close to one for the whole screen -- a flat glow over everything rather
+    // than shafts, which is what the box guard used to prevent by accident.
+    //
+    // So the lit fraction is scaled by how much of the ray was blocked.
+    // Nothing blocked means open air, which scatters no more here than
+    // anywhere else and so reads as nothing; a ray that passes a wall or a
+    // gantry keeps its lit part and shows it against the dark beside it. The
+    // smoothstep rather than a test, so a shaft fades in at its edge instead
+    // of switching on a pixel at a time.
+    float blocked = inside > 0.0 ? 1.0 - reached / inside : 0.0;
+    float shaft = smoothstep(0.0, 0.15, blocked);
+    float scatter = reached / float(steps) * shaft * push.params.x;
     out_color = vec4(push.light_color.rgb * scatter, 1.0);
 }

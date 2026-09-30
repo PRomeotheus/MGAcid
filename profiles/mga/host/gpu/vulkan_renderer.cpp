@@ -64,6 +64,19 @@ constexpr VkDeviceSize kVertexBufferBytes = 16u * 1024u * 1024u;
 // the bound that actually knows what the device can hold -- is the only one
 // left. The descriptor pool below is sized from this constant, so it follows.
 constexpr std::size_t kMaxCachedTextures = 4096u;
+// Descriptor sets for those textures, and why it is not the same number.
+//
+// An evicted texture keeps its descriptor set until the frame fence, because
+// draws already recorded into the open command buffer still reference it --
+// that is the whole reason eviction retires rather than destroys. So within
+// one frame the sets in use are the cache's contents PLUS everything retired
+// out of it, and sizing the pool to the cache's capacity means the first
+// eviction in a busy frame leaves the next texture without a set.
+//
+// That failure used to be silent and looked like nothing to do with textures:
+// the allocation's result was discarded, the draw bound a null set, and the
+// geometry just was not there. Buildings and fences dropping out of the scene.
+constexpr std::size_t kTextureDescriptorSets = kMaxCachedTextures * 2u;
 // Descriptor sets for sampling render targets as textures: two per target
 // (with its alpha, and with alpha forced to one for 5650 textures).
 constexpr std::size_t kMaxFramebufferTextureSets = 64u;
@@ -1341,6 +1354,10 @@ struct VulkanRenderer::Impl {
     // note on kMaxCachedTextures: this is the number that says whether the
     // entry cap is costing anything.
     std::uint64_t texture_evictions{};
+    // Textures that could not be given a descriptor set. Any number above zero
+    // means geometry came out white that should have been textured, and the
+    // pool is too small for how hard the cache is being worked.
+    std::uint64_t descriptor_failures{};
     // Textures evicted while a frame was being recorded. Destroyed at the top of
     // the next frame, once its fence says the frame that referenced them is done.
     std::vector<Texture> retired_textures;
@@ -1921,13 +1938,13 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
                              // and the two agree only for a one-binding layout.
                              // The volumetric sets are two apiece as well: the
                              // depth the world left, and the light's own map.
-                             static_cast<std::uint32_t>(kMaxCachedTextures + 1u + kMaxFramebufferTextureSets +
+                             static_cast<std::uint32_t>(kTextureDescriptorSets + 1u + kMaxFramebufferTextureSets +
                                                         3u * kMaxPostSets + kMaxAoSets + 2u * kMaxAoSets + 2u * kMaxAoSets + 1u)},
         VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 2u},
     };
     VkDescriptorPoolCreateInfo pool_info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     pool_info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-    pool_info.maxSets = static_cast<std::uint32_t>(kMaxCachedTextures + 2u + kMaxFramebufferTextureSets +
+    pool_info.maxSets = static_cast<std::uint32_t>(kTextureDescriptorSets + 2u + kMaxFramebufferTextureSets +
                                                     kMaxPostSets + kMaxAoSets + kMaxAoSets + kMaxAoSets);
     pool_info.poolSizeCount = static_cast<std::uint32_t>(pool_sizes.size());
     pool_info.pPoolSizes = pool_sizes.data();
@@ -4208,7 +4225,14 @@ VulkanRenderer::Impl::Texture VulkanRenderer::Impl::create_texture(std::uint32_t
     descriptor_info.descriptorPool = descriptor_pool;
     descriptor_info.descriptorSetCount = 1u;
     descriptor_info.pSetLayouts = &descriptor_layout;
-    vkAllocateDescriptorSets(device, &descriptor_info, &texture.descriptor);
+    // Checked, because the alternative is the failure above: a null set bound
+    // to a draw, and geometry that quietly is not drawn. White is wrong too,
+    // but it is wrong where it can be seen and counted.
+    if (vkAllocateDescriptorSets(device, &descriptor_info, &texture.descriptor) != VK_SUCCESS) {
+        ++descriptor_failures;
+        destroy_texture(texture);
+        return white_texture;
+    }
     VkDescriptorImageInfo image_info{texture_sampler(), texture.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
     VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
     write.dstSet = texture.descriptor;
@@ -5044,6 +5068,7 @@ std::string VulkanRenderer::video_memory_report() const {
     // that climbs while the camera pans is the count binding; one that stays
     // put is the budget doing its job.
     out << ", evicted " << impl.texture_evictions;
+    if (impl.descriptor_failures != 0u) out << ", NO DESCRIPTOR " << impl.descriptor_failures;
     return out.str();
 }
 

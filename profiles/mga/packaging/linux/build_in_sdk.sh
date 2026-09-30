@@ -3,14 +3,18 @@
 # "sniper" SDK container that scripts/release_linux.sh starts:
 #
 #   1. SDL3 from the source pinned in sources.sh
-#   2. the recompiled executable (generate.sh, then Yakumo), with the
+#   2. the recompiled executable (generate.sh, then MGAcid), with the
 #      LGPL-only FFmpeg the build bundles (cmake/FFmpeg.cmake)
-#   3. all 355 overlay libraries (build_overlays.sh)
-#   4. a staging tree with the executable, overlays/, lib/, fonts/ and
-#      licenses/, the part both the tarball and the Flatpak ship
+#   3. a staging tree with the executable, lib/, fonts/ and licenses/, the
+#      part both the tarball and the Flatpak ship
 #
-# Every step is resumable: finished dependencies are kept, ccache holds the
-# compiled code, and build_overlays.sh skips libraries that already exist.
+# There are no overlay libraries. The MHP3rd profile this was copied from
+# builds 355 of them; Metal Gear Ac!d loads relocatable stage modules through
+# ModuleMgr instead, kOverlaySlots holds only its end marker, and this profile
+# has no build_overlays.sh to call.
+#
+# Every step is resumable: finished dependencies are kept and ccache holds the
+# compiled code.
 #
 # Environment: YAKUMO_WORK (required) is the work directory; YAKUMO_JOBS the
 # number of parallel jobs (default 4).
@@ -28,7 +32,7 @@ sources="$work/sources"
 deps="$work/deps"
 deps_build="$work/deps-build"
 build="$work/build"
-stage="$work/stage/yakumo"
+stage="$work/stage/mgacid"
 
 export CC=gcc-14 CXX=g++-14
 export CCACHE_DIR="$work/ccache" CCACHE_MAXSIZE=20G
@@ -70,7 +74,7 @@ if ! stamp_matches sdl3 "$sdl_stamp"; then
     echo "$sdl_stamp" > "$deps/.sdl3.stamp"
 fi
 
-step "Configuring Yakumo (release)"
+step "Configuring MGAcid (release)"
 cmake -S "$repo_dir" -B "$build" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
     -DPSPRECOMP_PROFILE=mga \
@@ -90,29 +94,21 @@ done
 step "Generating the recompiled code"
 "$profile_dir/scripts/generate.sh" "$build"
 
-step "Building Yakumo"
-cmake --build "$build" -j "$jobs" --target Yakumo mga_savedata_tests
+step "Building MGAcid"
+cmake --build "$build" -j "$jobs" --target MGAcid mga_savedata_tests
 "$build/bin/mga_savedata_tests"
-
-step "Building the overlay libraries"
-"$profile_dir/scripts/build_overlays.sh" "$build" "$jobs"
-# build_overlays.sh skips libraries that already exist. A library left from an
-# earlier run must still match this executable's headers and flags, which only
-# Ninja's dependency tracking can tell: bring every target up to date.
-cmake --build "$build" -j "$jobs"
 
 step "Staging"
 rm -rf "$stage"
-mkdir -p "$stage/lib" "$stage/overlays" "$stage/fonts" "$stage/licenses"
-install -m 755 "$build/bin/Yakumo" "$stage/Yakumo"
-cp "$build/bin/overlays/"*.so "$stage/overlays/"
-strip --strip-unneeded "$stage/Yakumo" "$stage/overlays/"*.so
+mkdir -p "$stage/lib" "$stage/fonts" "$stage/licenses"
+install -m 755 "$build/bin/MGAcid" "$stage/MGAcid"
+strip --strip-unneeded "$stage/MGAcid"
 
 # The libraries built above that the executable needs, directly or through
 # each other, under the names the loader looks for.
 # SDL3 comes from the dependency prefix, FFmpeg from the build's bin/lib.
 needed() { objdump -p "$1" | awk '$1 == "NEEDED" { print $2 }'; }
-pending=("$stage/Yakumo")
+pending=("$stage/MGAcid")
 while [[ ${#pending[@]} -gt 0 ]]; do
     current="${pending[0]}"
     pending=("${pending[@]:1}")
@@ -130,7 +126,7 @@ while [[ ${#pending[@]} -gt 0 ]]; do
 done
 
 cp "$sources/NotoSansCJKjp-Regular.otf" "$stage/fonts/"
-cp "$repo_dir/LICENSE" "$stage/licenses/Yakumo-LICENSE.txt"
+cp "$repo_dir/LICENSE" "$stage/licenses/MGAcid-LICENSE.txt"
 cp "$here/../THIRD_PARTY_NOTICES.md" "$stage/licenses/THIRD_PARTY_NOTICES.md"
 cp "$deps_build/SDL3-$SDL3_VERSION/LICENSE.txt" "$stage/licenses/SDL3-LICENSE.txt"
 # The FFmpeg build leaves its licence and a note of its source and configure
@@ -142,20 +138,20 @@ cp "$sources/NotoSansCJK-LICENSE.txt" "$stage/licenses/NotoSansCJK-OFL.txt"
 
 step "Checking the staged program"
 # Everything must resolve from lib/ or from libraries every desktop has.
-missing="$(LD_LIBRARY_PATH='' ldd "$stage/Yakumo" | grep 'not found' || true)"
+missing="$(LD_LIBRARY_PATH='' ldd "$stage/MGAcid" | grep 'not found' || true)"
 if [[ -n "$missing" ]]; then
     echo "error: unresolved libraries:" >&2
     echo "$missing" >&2
     exit 1
 fi
-ldd "$stage/Yakumo" | grep "$stage/lib" || { echo "error: bundled libraries not used" >&2; exit 1; }
+ldd "$stage/MGAcid" | grep "$stage/lib" || { echo "error: bundled libraries not used" >&2; exit 1; }
 # No libstdc++ from the build machine is needed or exported.
-if objdump -p "$stage/Yakumo" "$stage/overlays/"*.so | grep -q 'NEEDED.*libstdc++'; then
+if objdump -p "$stage/MGAcid" | grep -q 'NEEDED.*libstdc++'; then
     echo "error: a staged binary needs libstdc++.so" >&2
     exit 1
 fi
-glibc_floor="$(objdump -T "$stage/Yakumo" "$stage/lib/"*.so* "$stage/overlays/"*.so |
+glibc_floor="$(objdump -T "$stage/MGAcid" "$stage/lib/"*.so* |
     grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)"
 echo "Newest glibc symbol version needed: $glibc_floor"
 echo "$glibc_floor" > "$work/stage/glibc-floor.txt"
-echo "Staged $(find "$stage/overlays" -name '*.so' | wc -l) overlay libraries in $stage"
+echo "Staged MGAcid and $(find "$stage/lib" -name '*.so*' | wc -l) libraries in $stage"

@@ -32,7 +32,7 @@ source "$packaging/sources.sh"
 app_id=io.github.teamgdb.Yakumo
 work="${YAKUMO_WORK:-$repo_dir/out/release-linux}"
 dist="$work/dist"
-stage="$work/stage/yakumo"
+stage="$work/stage/mgacid"
 
 version=""
 jobs=4
@@ -54,7 +54,7 @@ if [[ -z "$version" ]]; then
     version="$(git -C "$repo_dir" describe --tags --always --dirty)"
     version="${version#v}"
 fi
-name="yakumo-$version-linux-x86_64"
+name="mgacid-$version-linux-x86_64"
 export SOURCE_DATE_EPOCH="$(git -C "$repo_dir" log -1 --format=%ct)"
 
 step() { printf '\n=== %s\n' "$*"; }
@@ -145,7 +145,7 @@ check_no_game_data() {
 }
 
 # ---------------------------------------------------------------------------
-step "Yakumo $version for Linux"
+step "MGAcid $version for Linux"
 if [[ -n "$(git -C "$repo_dir" status --porcelain --untracked-files=no)" ]]; then
     echo "warning: the checkout has uncommitted changes; the version says -dirty" >&2
 fi
@@ -186,9 +186,10 @@ if [[ $skip_build -eq 0 ]]; then
         "$SDK_IMAGE" bash "$packaging/build_in_sdk.sh"
 fi
 
-[[ -x "$stage/Yakumo" ]] || fail "nothing staged in $stage; run without --skip-build"
-overlay_count="$(find "$stage/overlays" -name '*.so' | wc -l)"
-[[ "$overlay_count" -eq 355 ]] || fail "expected 355 overlay libraries, found $overlay_count"
+[[ -x "$stage/MGAcid" ]] || fail "nothing staged in $stage; run without --skip-build"
+# No overlay count to check. The MHP3rd profile this came from requires
+# exactly 355 shared libraries here; Ac!d builds none, so a count carried over
+# from that game would reject every correct build of this one.
 check_no_game_data "$stage" "the staged build"
 rm -rf "$dist"
 mkdir -p "$dist"
@@ -200,7 +201,7 @@ if [[ $make_tarball -eq 1 ]]; then
     rm -rf "$work/tarball"
     mkdir -p "$tree"
     cp -a "$stage/." "$tree/"
-    install -m 755 "$packaging/yakumo.sh" "$tree/yakumo"
+    install -m 755 "$packaging/mgacid.sh" "$tree/mgacid"
     install -m 644 "$packaging/README.txt" "$tree/README.txt"
     tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$SOURCE_DATE_EPOCH" \
         -C "$work/tarball" -cf - "$name" | gzip -n -9 > "$dist/$name.tar.gz"
@@ -225,8 +226,8 @@ if [[ $make_flatpak -eq 1 ]]; then
     source_dir="$work/flatpak/source"
     rm -rf "$source_dir"
     mkdir -p "$source_dir/files"
-    cp -al "$stage" "$source_dir/yakumo"
-    install -m 755 "$packaging/yakumo.sh" "$source_dir/files/yakumo"
+    cp -al "$stage" "$source_dir/mgacid"
+    install -m 755 "$packaging/mgacid.sh" "$source_dir/files/mgacid"
     install -m 644 "$packaging/$app_id.desktop" "$source_dir/files/"
     install -m 644 "$repo_dir/docs/images/emblem.svg" "$source_dir/files/$app_id.svg"
     sed -e "s/@VERSION@/$version/" -e "s/@DATE@/$(date -u -d "@$SOURCE_DATE_EPOCH" +%Y-%m-%d)/" \
@@ -262,7 +263,7 @@ cp "$work/sources/ffmpeg-$FFMPEG_VERSION.tar.xz" "$dist/" ||
     cat SHA256SUMS
 )
 {
-    echo "Yakumo $version for Linux (x86-64)"
+    echo "MGAcid $version for Linux (x86-64)"
     echo "Built from: $(git -C "$repo_dir" rev-parse HEAD)"
     echo "Build environment: $SDK_IMAGE"
     echo "Flatpak runtime: org.freedesktop.Platform//$FLATPAK_RUNTIME_VERSION"

@@ -81,18 +81,50 @@ float confusion(float distance_here, float focus) {
 void main() {
     const float here = distance_of(frag_uv);
 
-    // The focal plane: the middle of the screen, plus a small cross. The cross
-    // is why a railing across the centre does not pull focus -- it takes the
-    // nearest of the five, so the thing the camera is pointed at wins even
-    // when something thin crosses in front of the exact centre pixel.
+    // The focal plane: an average over a small region at the middle of the
+    // screen, not the nearest of a few taps at the exact centre.
+    //
+    // Taking the nearest was meant to stop a railing across the centre from
+    // pulling focus, and it does the opposite. The nearest of five samples IS
+    // the railing, so a thin object crossing the middle of the frame captures
+    // the focal plane, the whole background blurs, and when it passes the
+    // focus snaps back and the blur vanishes. Panning the camera across a
+    // scene with anything vertical in it -- a post, a doorframe, a fence --
+    // makes the defocus switch on and off, which is what a depth of field must
+    // never do, because the eye reads a change in blur as a change in what it
+    // is looking at.
+    //
+    // An average over a region is stable under exactly that motion: one thin
+    // object entering it moves the mean a little rather than replacing it.
+    // Samples at the far plane are left out, so an open sky over a courtyard
+    // does not drag the focus to infinity and blur the ground the camera is
+    // actually pointed at.
+    //
+    // This is not temporal smoothing and does not pretend to be. A cut still
+    // refocuses in one frame, which is what the eye does anyway; what it fixes
+    // is the focus changing when the scene did not.
     const vec2 middle = vec2(0.5);
-    const float step_x = push.texel.z * 8.0;
-    const float step_y = push.texel.w * 8.0;
-    float focus = distance_of(middle);
-    focus = min(focus, distance_of(middle + vec2(step_x, 0.0)));
-    focus = min(focus, distance_of(middle - vec2(step_x, 0.0)));
-    focus = min(focus, distance_of(middle + vec2(0.0, step_y)));
-    focus = min(focus, distance_of(middle - vec2(0.0, step_y)));
+    const float step_x = push.texel.z * 10.0;
+    const float step_y = push.texel.w * 10.0;
+    float focus_sum = 0.0;
+    float focus_weight = 0.0;
+    for (int y = -2; y <= 2; ++y) {
+        for (int x = -2; x <= 2; ++x) {
+            const float sampled = distance_of(middle + vec2(float(x) * step_x, float(y) * step_y));
+            // 0.999 rather than 1.0: the far plane is not always exactly one
+            // once a projection has been through a reversed-z remap.
+            if (sampled >= 0.999) continue;
+            focus_sum += sampled;
+            focus_weight += 1.0;
+        }
+    }
+    // Nothing but sky in the middle of the frame: there is no subject to focus
+    // on, so nothing is blurred rather than everything being.
+    if (focus_weight <= 0.0) {
+        out_color = vec4(0.0);
+        return;
+    }
+    const float focus = focus_sum / focus_weight;
 
     const float coc = confusion(here, focus) * clamp(push.params.y, 0.0, 1.0);
     if (coc <= 0.004) {

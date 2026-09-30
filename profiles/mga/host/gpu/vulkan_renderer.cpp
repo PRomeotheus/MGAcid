@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -48,7 +49,21 @@ namespace {
 
 constexpr std::uint32_t kPspWidth = 480u;
 constexpr std::uint32_t kPspHeight = 272u;
-constexpr VkDeviceSize kVertexBufferBytes = 16u * 1024u * 1024u;
+// One frame's vertices AND every uniform block, bump-allocated together and
+// reset at the top of each frame. When it runs out, every draw after that
+// point in the frame is dropped -- not degraded, dropped -- so whole buildings
+// and fences go missing and which ones depends on where the camera is looking.
+//
+// 16 MB was chosen when the only thing in here was vertices. It is not any
+// more: with shadows on, an environment block and an object block are written
+// for every transformed draw rather than only for the lit ones, because an
+// unlit draw needs its world matrix to find itself in the light's map. Those
+// blocks are a few hundred bytes each and there are hundreds of draws.
+//
+// 64 MB of host-visible memory costs nothing on anything this runs on, and the
+// status line reports the peak against it, so the guess is checkable rather
+// than permanent.
+constexpr VkDeviceSize kVertexBufferBytes = 64u * 1024u * 1024u;
 // How many textures the cache may hold at once, over and above the memory
 // budget that also bounds it.
 //
@@ -1291,15 +1306,27 @@ struct VulkanRenderer::Impl {
     // reported with the rest of the frame's numbers.
     VkDeviceSize peak_vertex_offset{};
     std::uint64_t dropped_draws{};
+    // Reported once a second rather than once ever.
+    //
+    // It used to print a single line for the life of the process, which meant
+    // that by the time anyone went looking the message had scrolled away hours
+    // earlier -- and a fault whose whole signature is "geometry is missing and
+    // nothing says why" is exactly the one that cannot afford a report you
+    // have to have been watching for. The counts also reach the status line,
+    // so the number is visible without reading stdout at all.
     void note_drop(const char *where) {
         ++dropped_draws;
-        static bool reported = false;
-        if (!reported) {
-            reported = true;
-            std::cout << "[render] the vertex arena is full (" << where << "); draws are being dropped. "
-                      << "Everything after this in the frame is missing from it.\n";
-        }
+        ++drops_this_second;
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last_drop_report < std::chrono::seconds(1)) return;
+        last_drop_report = now;
+        std::cout << "[render] the vertex arena is full (" << where << "): " << drops_this_second
+                  << " draws dropped in the last second, " << dropped_draws << " in all. Everything after the"
+                  << " point it filled is missing from its frame.\n";
+        drops_this_second = 0u;
     }
+    std::uint64_t drops_this_second{};
+    std::chrono::steady_clock::time_point last_drop_report{};
     VkSampler sampler{};        // linear
     VkSampler sharp_sampler{};  // nearest, for the sharp texture setting
     VkSampler mip_sampler{};    // trilinear + anisotropic, for smooth textures
@@ -5068,6 +5095,11 @@ std::string VulkanRenderer::video_memory_report() const {
     // that climbs while the camera pans is the count binding; one that stays
     // put is the budget doing its job.
     out << ", evicted " << impl.texture_evictions;
+    // The arena, against what it is allowed. This is the number that says
+    // whether geometry is going missing because the frame ran out of room.
+    out << ", arena peak " << static_cast<double>(impl.peak_vertex_offset) / kMegabyte << "/"
+        << static_cast<double>(kVertexBufferBytes) / kMegabyte << " MB";
+    if (impl.dropped_draws != 0u) out << ", DRAWS DROPPED " << impl.dropped_draws;
     if (impl.descriptor_failures != 0u) out << ", NO DESCRIPTOR " << impl.descriptor_failures;
     return out.str();
 }

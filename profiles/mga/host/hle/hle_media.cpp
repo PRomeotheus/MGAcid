@@ -1125,9 +1125,22 @@ void register_audio(HleRegistrar &hle) {
             kernel().finish(ctx, 0u);
         });
     }
-    // Reverb is not modelled, so the sends are accepted and dropped.
-    for (const char *name : {"__sceSasRevType", "__sceSasRevParam", "__sceSasRevEVOL", "__sceSasRevVON"})
-        hle.add("sceSasCore", name, [](Runtime &, AllegrexContext &ctx) { kernel().finish(ctx, 0u); });
+    // Reverb is not modelled, so the sends are accepted and dropped -- but
+    // what the game ASKED for is reported the first time it asks.
+    //
+    // Whether modelling the SPU's reverb is worth days of work turns entirely
+    // on whether this game uses it, and dropping the calls in silence is
+    // exactly what stops anyone finding out. A stealth game set in corridors
+    // and stairwells very likely does; if these lines never appear, it does
+    // not, and the whole question closes for the price of one run.
+    for (const char *name : {"__sceSasRevType", "__sceSasRevParam", "__sceSasRevEVOL", "__sceSasRevVON"}) {
+        const std::string key = std::string("rev-") + name;
+        hle.add("sceSasCore", name, [key](Runtime &, AllegrexContext &ctx) {
+            log_once(key, "[sas] " + key.substr(4) + "(" + std::to_string(arg(ctx, 1)) + ", " +
+                              std::to_string(arg(ctx, 2)) + ") -- reverb is accepted but not modelled");
+            kernel().finish(ctx, 0u);
+        });
+    }
     hle.add("sceSasCore", "__sceSasGetOutputmode", [](Runtime &, AllegrexContext &ctx) {
         kernel().finish(ctx, audio::sas_core(arg(ctx, 0)).output_mode());
     });

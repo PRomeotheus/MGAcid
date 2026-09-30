@@ -274,6 +274,12 @@ const std::vector<Field> &fields() {
         {"audio.volume", nullptr,
          [](Settings &s, const std::string &t) { return parse_uint(t, 0u, 100u, s.volume); },
          [](const Settings &s) { return std::to_string(s.volume); }, nullptr},
+        {"audio.effects_volume", nullptr,
+         [](Settings &s, const std::string &t) { return parse_uint(t, 0u, 100u, s.effects_volume); },
+         [](const Settings &s) { return std::to_string(s.effects_volume); }, nullptr},
+        {"audio.music_volume", nullptr,
+         [](Settings &s, const std::string &t) { return parse_uint(t, 0u, 100u, s.music_volume); },
+         [](const Settings &s) { return std::to_string(s.music_volume); }, nullptr},
         BOOL_FIELD("audio.mute", mute),
         {"input.confirm", "MGA_PAD_FACE",
          [](Settings &s, const std::string &t) {

@@ -78,6 +78,8 @@ struct Settings {
 
     // Audio
     std::uint32_t volume{100u};        // percent
+    std::uint32_t effects_volume{100};  // 0 .. 100; the SAS voices: footsteps, gunfire, the interface
+    std::uint32_t music_volume{100};    // 0 .. 100; the ATRAC streams: music and recorded speech
     bool mute{};
 
     // Controls

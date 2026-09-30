@@ -38,8 +38,10 @@ struct SasVoice {
     std::int32_t history1{};
     std::int32_t history2{};
     std::array<std::int16_t, 28> decoded{};
-    std::int16_t previous{};
-    std::int16_t current{};
+    // The last four source samples, oldest first. Four rather than two
+    // because the resampler fits a curve through them instead of drawing a
+    // straight line between the middle pair; see the note in render().
+    std::array<std::int16_t, 4> history{};
     bool source_ended{};
     bool primed{};
 

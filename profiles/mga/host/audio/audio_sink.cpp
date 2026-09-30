@@ -207,6 +207,8 @@ void AudioSink::initialize() {
     impl.enabled = std::getenv("MGA_NO_AUDIO") == nullptr;
     const settings::Settings &player = settings::current();
     impl.gain = player.mute ? 0.0f : static_cast<float>(player.volume) / 100.0f;
+    set_effects_gain(static_cast<float>(player.effects_volume) / 100.0f);
+    set_music_gain(static_cast<float>(player.music_volume) / 100.0f);
 
     if (const char *path = std::getenv("MGA_AUDIO_DUMP")) {
         if (impl.dump.open(path))
@@ -261,6 +263,16 @@ void AudioSink::shutdown() {
         std::fflush(stdout);
     }
 }
+
+namespace {
+float effects_gain_value = 1.0f;
+float music_gain_value = 1.0f;
+} // namespace
+
+void set_effects_gain(float gain) { effects_gain_value = std::clamp(gain, 0.0f, 1.0f); }
+void set_music_gain(float gain) { music_gain_value = std::clamp(gain, 0.0f, 1.0f); }
+float effects_gain() noexcept { return effects_gain_value; }
+float music_gain() noexcept { return music_gain_value; }
 
 void AudioSink::set_volume(float gain) {
     Impl &impl = *impl_;

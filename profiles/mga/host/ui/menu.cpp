@@ -716,6 +716,22 @@ void Menu::audio() {
         sink.set_volume(gain(s));
         settings::save();
     }
+    int effects = static_cast<int>(s.effects_volume);
+    if (slider_row("Effects", effects, 0, 100, 5, "%d%%",
+                   locked("audio.effects_volume",
+                          "Loudness of footsteps, gunfire, the interface -- everything the game plays as a sound "
+                          "effect."))) {
+        s.effects_volume = static_cast<std::uint32_t>(effects);
+        audio::set_effects_gain(static_cast<float>(s.effects_volume) / 100.0f);
+        settings::save();
+    }
+    int music = static_cast<int>(s.music_volume);
+    if (slider_row("Music and voice", music, 0, 100, 5, "%d%%",
+                   locked("audio.music_volume", "Loudness of the music and the recorded speech."))) {
+        s.music_volume = static_cast<std::uint32_t>(music);
+        audio::set_music_gain(static_cast<float>(s.music_volume) / 100.0f);
+        settings::save();
+    }
     if (toggle_row("Mute", s.mute, locked("audio.mute", "Silence the game without losing the volume setting."))) {
         s.mute = !s.mute;
         sink.set_volume(gain(s));
@@ -724,10 +740,14 @@ void Menu::audio() {
     info_row("Device", device ? (paused_ ? "44100 Hz stereo, paused while this menu is open" : "44100 Hz stereo")
                               : "None");
     ImGui::Dummy({0.0f, font_gap()});
-    if (button_row("Restore audio defaults", {!device, {}, "Full volume, not muted."})) {
+    if (button_row("Restore audio defaults", {!device, {}, "Every level full, not muted."})) {
         s.volume = settings::defaults().volume;
+        s.effects_volume = settings::defaults().effects_volume;
+        s.music_volume = settings::defaults().music_volume;
         s.mute = settings::defaults().mute;
         sink.set_volume(gain(s));
+        audio::set_effects_gain(static_cast<float>(s.effects_volume) / 100.0f);
+        audio::set_music_gain(static_cast<float>(s.music_volume) / 100.0f);
         settings::save();
     }
 }

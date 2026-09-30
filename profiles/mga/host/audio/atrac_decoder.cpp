@@ -1,5 +1,7 @@
 #include "audio/atrac_decoder.hpp"
 
+#include "audio/audio_sink.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -103,6 +105,10 @@ std::size_t AtracDecoder::decode(std::span<const std::uint8_t> frame, std::int16
         return 0u;
     }
     const unsigned channels = static_cast<unsigned>(impl.frame->ch_layout.nb_channels);
+    // The Music and voice slider. Applied here, on the decoder's own floats,
+    // which is the last place this sound is separable from the effects: the
+    // game writes both into the same audio channels after this.
+    const float gain = music_gain();
     for (std::size_t i = 0; i < samples; ++i) {
         float left{};
         float right{};
@@ -114,8 +120,8 @@ std::size_t AtracDecoder::decode(std::span<const std::uint8_t> frame, std::int16
             left = interleaved[i * channels];
             right = channels > 1u ? interleaved[i * channels + 1u] : left;
         }
-        out[i * 2u] = to_pcm16(left);
-        out[i * 2u + 1u] = to_pcm16(right);
+        out[i * 2u] = to_pcm16(left * gain);
+        out[i * 2u + 1u] = to_pcm16(right * gain);
     }
     av_frame_unref(impl.frame);
     return samples;

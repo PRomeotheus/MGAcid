@@ -1,10 +1,14 @@
 #include "audio/sas_core.hpp"
 
+#include "audio/audio_sink.hpp"
+
 #include <algorithm>
 #include <bit>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <map>
+#include <vector>
 
 namespace mga::audio {
 namespace {
@@ -137,8 +141,7 @@ void SasCore::key_on(std::uint32_t voice) {
     v.phase = 0u;
     v.history1 = 0;
     v.history2 = 0;
-    v.previous = 0;
-    v.current = 0;
+    v.history = {};
     v.source_ended = v.address == 0u || v.size < (v.pcm ? 2u : 16u);
     v.primed = false;
     v.paused = false;
@@ -226,7 +229,9 @@ void SasCore::decode_block(const psprecomp::GuestMemory &memory, SasVoice &voice
 }
 
 void SasCore::advance_source(const psprecomp::GuestMemory &memory, SasVoice &voice) {
-    voice.previous = voice.current;
+    voice.history[0] = voice.history[1];
+    voice.history[1] = voice.history[2];
+    voice.history[2] = voice.history[3];
     if (voice.pcm) {
         const std::uint32_t offset = voice.block;
         if (offset + 2u > voice.size) {
@@ -234,12 +239,12 @@ void SasCore::advance_source(const psprecomp::GuestMemory &memory, SasVoice &voi
                 voice.block = 0u;
             } else {
                 voice.source_ended = true;
-                voice.current = 0;
+                voice.history[3] = 0;
                 return;
             }
         }
         const std::uint8_t *sample = memory.raw_pointer(voice.address + voice.block, 2u);
-        voice.current = sample != nullptr ? static_cast<std::int16_t>(sample[0] | (sample[1] << 8))
+        voice.history[3] = sample != nullptr ? static_cast<std::int16_t>(sample[0] | (sample[1] << 8))
                                           : static_cast<std::int16_t>(0);
         voice.block += 2u;
         return;
@@ -247,11 +252,11 @@ void SasCore::advance_source(const psprecomp::GuestMemory &memory, SasVoice &voi
     if (voice.index >= 28) {
         decode_block(memory, voice);
         if (voice.source_ended) {
-            voice.current = 0;
+            voice.history[3] = 0;
             return;
         }
     }
-    voice.current = voice.decoded[static_cast<std::size_t>(voice.index++)];
+    voice.history[3] = voice.decoded[static_cast<std::size_t>(voice.index++)];
 }
 
 void SasCore::step_envelope(SasVoice &voice) {
@@ -317,6 +322,15 @@ void SasCore::step_envelope(SasVoice &voice) {
 
 void SasCore::render(const psprecomp::GuestMemory &memory, std::int16_t *output, std::size_t frames) {
     std::fill_n(output, frames * 2u, static_cast<std::int16_t>(0));
+    // Voices are summed here at full width and clamped once, on the way out.
+    //
+    // Each voice used to be clamped into the output as it was added, so two
+    // loud voices that would have cancelled could not: the first was cut to
+    // fit sixteen bits before the second was allowed to pull it back. That
+    // turns a passing overlap -- gunfire over music, several alerts at once --
+    // into distortion that the hardware's own mixer would not have made.
+    static std::vector<std::int32_t> mix;
+    mix.assign(frames * 2u, 0);
     // Sampled before mixing: a short voice can finish inside this very block.
     if (tracing())
         trace().voices = std::max(trace().voices, static_cast<std::uint32_t>(std::popcount(
@@ -325,25 +339,48 @@ void SasCore::render(const psprecomp::GuestMemory &memory, std::int16_t *output,
         SasVoice &voice = voices_[index];
         if (!voice.playing || voice.paused) continue;
 
-        // Keying on leaves the decoder empty, so the first two source samples
-        // that the interpolator needs are fetched here.
+        // Keying on leaves the decoder empty, so the samples the interpolator
+        // needs are fetched here -- four now rather than two, which starts the
+        // voice one source sample further in. At 44100 that is twenty-three
+        // microseconds and it is the same for every voice, so nothing drifts.
         if (!voice.primed) {
             voice.primed = true;
-            advance_source(memory, voice);
-            advance_source(memory, voice);
+            for (int prime = 0; prime < 4; ++prime) advance_source(memory, voice);
         }
 
         for (std::size_t frame = 0; frame < frames; ++frame) {
-            const std::int32_t span = voice.current - voice.previous;
+            // A curve through four samples rather than a line between two.
+            //
+            // The hardware interpolated linearly and so did this, which is
+            // faithful and also the cheapest thing that exists. A straight
+            // line between two samples is wrong everywhere in between, and how
+            // wrong depends on the pitch: a voice played back faster than it
+            // was recorded lands its output points further apart on the source
+            // curve, so the error grows exactly where the sound is brightest.
+            // It is heard as dullness and as a gritty edge on anything
+            // pitched up, which on a console meant most of the effects, since
+            // pitching one sample up and down is how you get a family of
+            // sounds out of a machine with no room for a family of samples.
+            //
+            // Catmull-Rom passes through its control points -- at phase 0 the
+            // answer is exactly the recorded sample, not an approximation of
+            // it -- so nothing is smeared that was not already between two
+            // samples to begin with.
+            const float t = static_cast<float>(voice.phase) / static_cast<float>(kPitchUnity);
+            const float p0 = voice.history[0], p1 = voice.history[1];
+            const float p2 = voice.history[2], p3 = voice.history[3];
+            const float a = 2.0f * p1;
+            const float c = -p0 + p2;
+            const float d = 2.0f * p0 - 5.0f * p1 + 4.0f * p2 - p3;
+            const float e = -p0 + 3.0f * p1 - 3.0f * p2 + p3;
             const std::int32_t sample =
-                voice.previous + ((span * static_cast<std::int32_t>(voice.phase)) >> 12);
+                clamp16(static_cast<std::int32_t>(std::lround(0.5f * (a + t * (c + t * (d + t * e))))));
             step_envelope(voice);
             const std::int32_t scaled = (sample * voice.envelope) >> 15;
             const std::size_t slot = frame * 2u;
-            output[slot] = static_cast<std::int16_t>(
-                clamp16(output[slot] + ((scaled * voice.left) >> 12)));
-            output[slot + 1u] = static_cast<std::int16_t>(
-                clamp16(output[slot + 1u] + ((scaled * voice.right) >> 12)));
+            // Summed at full width and clamped once at the end; see below.
+            mix[slot] += (scaled * voice.left) >> 12;
+            mix[slot + 1u] += (scaled * voice.right) >> 12;
 
             voice.phase += voice.pitch;
             while (voice.phase >= kPitchUnity) {
@@ -359,6 +396,15 @@ void SasCore::render(const psprecomp::GuestMemory &memory, std::int16_t *output,
             if (!voice.playing) break;
         }
     }
+    // The Effects slider. One multiply on the way out, after the sum and
+    // before the clamp, so turning effects down gives the mix more headroom
+    // rather than less.
+    const float gain = effects_gain();
+    for (std::size_t sample = 0; sample < frames * 2u; ++sample)
+        output[sample] = static_cast<std::int16_t>(
+            clamp16(gain >= 0.999f ? mix[sample]
+                                   : static_cast<std::int32_t>(std::lround(static_cast<float>(mix[sample]) * gain))));
+
     if (!tracing()) return;
     RenderTrace &stats = trace();
     stats.frames += frames;

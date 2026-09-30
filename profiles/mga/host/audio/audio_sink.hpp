@@ -9,6 +9,17 @@ namespace mga::audio {
 inline constexpr std::uint32_t kSampleRate = 44'100u;
 inline constexpr std::uint32_t kChannels = 2u;
 
+// Two gains, applied where the sound is made rather than where it is played,
+// because by the time it reaches the device the game has already mixed them.
+// Effects are what the SAS voices produce; music and voice are what the ATRAC
+// streams decode to. That is the split the hardware makes, so it is the only
+// one available without knowing what each sound IS -- a footstep and a piece
+// of music are told apart by which part of the machine produced them.
+void set_effects_gain(float gain);
+void set_music_gain(float gain);
+[[nodiscard]] float effects_gain() noexcept;
+[[nodiscard]] float music_gain() noexcept;
+
 // Host playback for the guest's 44100 Hz stereo stream.
 //
 // The guest and the audio device run on unrelated clocks: the kernel's virtual

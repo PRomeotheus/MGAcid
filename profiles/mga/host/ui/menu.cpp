@@ -270,9 +270,12 @@ void Menu::video() {
             "How much of the world fits on screen, as a percentage of what the game asks for. The field is widened "
             "properly rather than by stretching the picture, so nothing changes shape: the aspect ratio the game "
             "chose is kept and only how much fits changes. Ac!d places its camera itself, shot by shot, so this is "
-            "the one way to see more of a room without moving it. Past about 120% expect to find the edges of what "
-            "the game bothered to draw -- it culls to its own field, not to this one.");
-        if (slider_row("Field of view", field, 80, 160, 5, "%d%%", o)) {
+            "the one way to see more of a room without moving it.\n\n"
+            "It stops at 110% because the game decides what to draw before this is applied, and it decides using "
+            "its own field. Wider than that and the extra view is filled with whatever the game did not think you "
+            "could see: buildings and fences that appear and vanish as the camera turns. Narrowing is always safe, "
+            "since it only ever shows less.");
+        if (slider_row("Field of view", field, 80, 110, 5, "%d%%", o)) {
             s.field_of_view = static_cast<float>(field) / 100.0f;
             renderer().set_field_of_view(s.field_of_view);
             settings::save();

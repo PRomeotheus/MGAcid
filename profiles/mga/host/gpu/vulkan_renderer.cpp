@@ -1649,7 +1649,7 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
     // particular scene.
     impl.tonemap_curve = std::clamp(player.tonemap_curve, 0.0f, 4.0f);
     impl.surface_relief = std::clamp(player.surface_relief, 0.0f, 8.0f);
-    impl.field_of_view = std::clamp(player.field_of_view, 0.8f, 1.6f);
+    impl.field_of_view = std::clamp(player.field_of_view, 0.8f, 1.1f);
     impl.accurate_specular = player.accurate_specular;
     impl.light_intensity = std::clamp(player.light_intensity, 0.25f, 8.0f);
     impl.ambient_shape = std::clamp(player.ambient_shape, 0.0f, 1.0f);
@@ -4962,7 +4962,7 @@ void VulkanRenderer::set_light_intensity(float intensity, float dither) {
 }
 
 void VulkanRenderer::set_field_of_view(float factor) {
-    if (impl_) impl_->field_of_view = std::clamp(factor, 0.8f, 1.6f);
+    if (impl_) impl_->field_of_view = std::clamp(factor, 0.8f, 1.1f);
 }
 
 void VulkanRenderer::set_surface_relief(float strength) {

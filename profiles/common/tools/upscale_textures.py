@@ -48,9 +48,14 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-# Beyond this the pack costs more video memory than the detail is worth: the
-# renderer caches by texture count, not bytes, so a folder of very large
-# replacements can fill a device.
+# Beyond this the pack costs more video memory than the detail is worth.
+#
+# The original reason -- that the renderer caches by texture count rather than
+# bytes, so large replacements could fill a device -- no longer holds: the
+# cache has a memory budget, and its count was raised to 4096 so that the
+# budget is the bound that binds. The cap stays as a default because a folder
+# of 2048px replacements is still a poor trade, but it is now an argument, and
+# Ac!d's two 544x80 title images are the case for raising it.
 MAX_EDGE = 2048
 # Below this there is nothing for a model to work with, and the result is
 # invention rather than restoration.
@@ -184,6 +189,8 @@ def main() -> int:
                         help="leave textures the pack already has, so a re-run only does the new ones")
     parser.add_argument("--min-edge", type=int, default=MIN_EDGE,
                         help=f"shortest edge worth enlarging (default {MIN_EDGE}); lower it for tiled strips")
+    parser.add_argument("--max-edge", type=int, default=MAX_EDGE,
+                        help=f"largest edge the result may reach (default {MAX_EDGE})")
     args = parser.parse_args()
 
     sources = sorted(p for p in args.dump.glob("*.png"))
@@ -214,7 +221,7 @@ def main() -> int:
 
         width, height = image.size
         reason = ""
-        if max(width, height) * 4 > MAX_EDGE:
+        if max(width, height) * 4 > args.max_edge:
             reason = f"already {width}x{height}"
         elif min(width, height) < args.min_edge:
             reason = f"only {width}x{height}"

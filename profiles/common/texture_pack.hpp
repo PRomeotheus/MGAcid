@@ -59,6 +59,27 @@ public:
     // lookup in total rather than one per frame.
     [[nodiscard]] const PackedTexture *find(std::uint64_t key);
 
+    // The same lookup, without decoding on this thread.
+    //
+    // A replacement is a PNG as large as someone chose to make it, and a 4x
+    // enlargement of a 512x512 texture is a 2048x2048 file taking tens of
+    // milliseconds to decode. A stage appearing wants 151 of them in one frame,
+    // far longer than the audio ring holds, so the frame that waits for them is
+    // heard as a gap in the music.
+    //
+    // Returns the replacement if a worker has already decoded it, and otherwise
+    // null, having queued it. The caller draws the guest's own texture meanwhile
+    // and asks again once `completed` names the key: a frame or two at the
+    // original resolution, and no stall.
+    //
+    // The worker is process-wide rather than a member, because Impl is
+    // move-assigned at shutdown and a mutex cannot be moved. One pack per
+    // process is the only arrangement this port has ever had.
+    [[nodiscard]] const PackedTexture *find_ready(std::uint64_t key);
+
+    // Keys decoded since the last call, and cleared by it. Called once a frame.
+    [[nodiscard]] std::vector<std::uint64_t> completed();
+
     // Turns dumping on. Every texture decoded from then on is written once.
     void set_dumping(bool on);
     [[nodiscard]] bool dumping() const noexcept { return dumping_; }

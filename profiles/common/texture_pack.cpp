@@ -1,6 +1,11 @@
 #include "common/texture_pack.hpp"
 
+#include <condition_variable>
+#include <deque>
 #include <fstream>
+#include <mutex>
+#include <set>
+#include <thread>
 #include <iostream>
 
 #if defined(MGA_HAS_FFMPEG)
@@ -289,6 +294,106 @@ const PackedTexture *TexturePack::find(std::uint64_t key) {
     cache_.emplace(key, std::nullopt);
     return nullptr;
 #endif
+}
+
+namespace {
+
+// The decode worker, process-wide. It outlives any one lookup and holds the
+// full path with each request, so it never reads anything owned by the pack.
+struct Decoder {
+    std::mutex mutex;
+    std::condition_variable wake;
+    std::deque<std::pair<std::uint64_t, std::filesystem::path>> queue;
+    std::set<std::uint64_t> queued;
+    std::map<std::uint64_t, std::optional<PackedTexture>> ready;
+    std::vector<std::uint64_t> finished;
+    std::thread worker;
+
+    void start() {
+        if (worker.joinable()) return;
+        worker = std::thread([this] {
+            for (;;) {
+                std::pair<std::uint64_t, std::filesystem::path> job;
+                {
+                    std::unique_lock<std::mutex> lock(mutex);
+                    wake.wait(lock, [this] { return !queue.empty(); });
+                    job = std::move(queue.front());
+                    queue.pop_front();
+                }
+                // Decoded outside the lock: this is the slow part, and holding
+                // the lock through it would stall the next lookup.
+                std::optional<PackedTexture> decoded;
+#if defined(MGA_HAS_FFMPEG)
+                std::error_code code;
+                if (std::filesystem::is_regular_file(job.second, code)) {
+                    PackedTexture texture;
+                    std::string error;
+                    if (read_png(job.second, texture, error))
+                        decoded = std::move(texture);
+                    else
+                        std::cout << "[textures] " << job.second.filename().string() << " " << error << "\n";
+                }
+#endif
+                {
+                    std::lock_guard<std::mutex> lock(mutex);
+                    ready.emplace(job.first, std::move(decoded));
+                    finished.push_back(job.first);
+                    queued.erase(job.first);
+                }
+            }
+        });
+        // Never joined: it only ever waits on a condition variable, and the
+        // process ending is the only thing that stops it. Detaching says so.
+        worker.detach();
+    }
+};
+
+Decoder &decoder() {
+    static Decoder instance;
+    return instance;
+}
+
+} // namespace
+
+const PackedTexture *TexturePack::find_ready(std::uint64_t key) {
+    if (!available_) return nullptr;
+    const auto cached = cache_.find(key);
+    if (cached != cache_.end()) return cached->second ? &*cached->second : nullptr;
+#if !defined(MGA_HAS_FFMPEG)
+    cache_.emplace(key, std::nullopt);
+    return nullptr;
+#else
+    Decoder &d = decoder();
+    {
+        std::lock_guard<std::mutex> lock(d.mutex);
+        const auto done = d.ready.find(key);
+        if (done != d.ready.end()) {
+            // Moved into cache_, which this thread alone reads, so the lock is
+            // not needed for this key again.
+            auto inserted = cache_.emplace(key, std::move(done->second));
+            d.ready.erase(done);
+            if (inserted.first->second) {
+                ++loaded_;
+                return &*inserted.first->second;
+            }
+            return nullptr;
+        }
+        if (d.queued.insert(key).second) {
+            d.queue.emplace_back(key, replacements_ / (key_name(key) + ".png"));
+            d.wake.notify_one();
+        }
+    }
+    d.start();
+    return nullptr;
+#endif
+}
+
+std::vector<std::uint64_t> TexturePack::completed() {
+    Decoder &d = decoder();
+    std::lock_guard<std::mutex> lock(d.mutex);
+    std::vector<std::uint64_t> out;
+    out.swap(d.finished);
+    return out;
 }
 
 void TexturePack::set_dumping(bool on) {

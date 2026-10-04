@@ -1305,6 +1305,11 @@ struct VulkanRenderer::Impl {
     // note on kMaxCachedTextures: this is the number that says whether the
     // entry cap is costing anything.
     std::uint64_t texture_evictions{};
+    // pack key -> the texture cache keys drawn from the guest's own image
+    // while that replacement is still decoding. When the decode lands, those
+    // entries are retired so the next draw rebuilds them from the pack.
+    std::unordered_map<std::uint64_t, std::vector<std::uint64_t>> awaiting_pack;
+    std::uint64_t pack_replacements_applied{};
     // Textures that could not be given a descriptor set. Any number above zero
     // means geometry came out white that should have been textured, and the
     // pool is too small for how hard the cache is being worked.
@@ -4141,7 +4146,18 @@ VulkanRenderer::Impl::Texture &VulkanRenderer::Impl::texture_for(const GuestMemo
     const PackedTexture *replacement = nullptr;
     if (texture_pack_enabled) {
         const perf::spike::Scope timing(perf::spike::Stage::Pack);
-        replacement = texture_pack.find(pack_key);
+        // find_ready never decodes here: it returns what a worker has already
+        // finished and queues the rest. MGA_SYNC_PACK restores the old
+        // behaviour, which is the comparison this change should be judged on.
+        static const bool synchronous = std::getenv("MGA_SYNC_PACK") != nullptr;
+        replacement = synchronous ? texture_pack.find(pack_key) : texture_pack.find_ready(pack_key);
+        if (replacement == nullptr && !synchronous && pack_key != 0u) {
+            // One entry per cache key. The same texture misses every frame
+            // until its replacement lands, and several addresses can share a
+            // pack key, so this is a small set rather than a push each time.
+            std::vector<std::uint64_t> &waiting = awaiting_pack[pack_key];
+            if (std::find(waiting.begin(), waiting.end(), key) == waiting.end()) waiting.push_back(key);
+        }
     }
     perf::spike::count_miss(replacement != nullptr);
     // MGA_PACK_MISS: why a texture the pack could have replaced did not get
@@ -5253,6 +5269,26 @@ void VulkanRenderer::begin_frame() {
     impl.destroy_retired_textures();
     // Same reasoning, and the same one safe moment.
     impl.evict_targets();
+    // Replacements a worker decoded while the last frame was being drawn.
+    // Retiring the entry that drew the guest's own image is the whole of it:
+    // the next draw misses, asks the pack again, and this time find_ready has
+    // the texture in hand.
+    //
+    // Done here and not when the decode lands, because the fence above is the
+    // one moment a texture the GPU may have been reading is known to be idle.
+    for (const std::uint64_t pack_key : impl.texture_pack.completed()) {
+        const auto waiting = impl.awaiting_pack.find(pack_key);
+        if (waiting == impl.awaiting_pack.end()) continue;
+        for (const std::uint64_t texture_key : waiting->second) {
+            const auto found = impl.textures.find(texture_key);
+            if (found == impl.textures.end()) continue;
+            impl.retired_bytes += found->second.bytes;
+            impl.retired_textures.push_back(found->second);
+            impl.textures.erase(found);
+            ++impl.pack_replacements_applied;
+        }
+        impl.awaiting_pack.erase(waiting);
+    }
     vkResetCommandBuffer(impl.command_buffer, 0u);
     VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;

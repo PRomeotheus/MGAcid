@@ -748,6 +748,15 @@ struct VulkanRenderer::Impl {
     // vkQueueWaitIdle, which waits for everything the queue holds -- including
     // the frame being drawn -- rather than for the copy just submitted.
     VkFence upload_fence{};
+    // Staging for texture uploads, grown to the largest seen and then kept,
+    // mapped. vkCreateBuffer, vkAllocateMemory and vkMapMemory are driver
+    // calls, and the frame a stage appears does 151 uploads. Named apart from
+    // upload_staging above, which belongs to the framebuffer readback path.
+    VkBuffer texture_staging{};
+    VkDeviceMemory texture_staging_memory{};
+    VkDeviceSize texture_staging_bytes{};
+    void *texture_staging_mapped{};
+    VkCommandBuffer texture_commands{};
     VkSemaphore image_available{};
     VkSemaphore render_finished{};
     VkPresentModeKHR present_mode{VK_PRESENT_MODE_FIFO_KHR};
@@ -3812,11 +3821,6 @@ VulkanRenderer::Impl::Texture VulkanRenderer::Impl::create_texture(std::uint32_t
     texture_bytes += texture.bytes;
 
     const VkDeviceSize bytes = static_cast<VkDeviceSize>(width) * height * 4u;
-    VkBuffer staging{};
-    VkDeviceMemory staging_memory{};
-    VkBufferCreateInfo buffer_info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-    buffer_info.size = bytes;
-    buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
     // Checked, unlike most allocations here, because these are the ones whose
     // size the guest decides: a 512x512 texture scaled four times needs 16 MB of
     // staging, and a texture-pack replacement can need four times that again.
@@ -3828,32 +3832,62 @@ VulkanRenderer::Impl::Texture VulkanRenderer::Impl::create_texture(std::uint32_t
             reported = true;
             std::cout << "[render] cannot stage a texture (" << what << "); it will be drawn white\n";
         }
-        if (staging_memory != VK_NULL_HANDLE) vkFreeMemory(device, staging_memory, nullptr);
-        if (staging != VK_NULL_HANDLE) vkDestroyBuffer(device, staging, nullptr);
         return Texture{};
     };
-    if (vkCreateBuffer(device, &buffer_info, nullptr, &staging) != VK_SUCCESS) return give_up("no buffer");
-    VkMemoryRequirements requirements{};
-    vkGetBufferMemoryRequirements(device, staging, &requirements);
-    VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-    allocate.allocationSize = requirements.size;
-    allocate.memoryTypeIndex = find_memory_type(
-        requirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    if (vkAllocateMemory(device, &allocate, nullptr, &staging_memory) != VK_SUCCESS)
-        return give_up("out of host memory");
-    if (vkBindBufferMemory(device, staging, staging_memory, 0u) != VK_SUCCESS) return give_up("cannot bind");
-    void *mapped = nullptr;
-    if (vkMapMemory(device, staging_memory, 0u, bytes, 0u, &mapped) != VK_SUCCESS || mapped == nullptr)
-        return give_up("cannot map");
-    std::memcpy(mapped, pixels, static_cast<std::size_t>(bytes));
-    vkUnmapMemory(device, staging_memory);
+    // Regrown only when a bigger texture arrives. Textures come in a handful of
+    // sizes, so after the first frames this allocates nothing. The previous
+    // upload was waited on before we got here, so rewriting it cannot race the
+    // GPU.
+    if (texture_staging_bytes < bytes) {
+        if (texture_staging_mapped != nullptr) vkUnmapMemory(device, texture_staging_memory);
+        if (texture_staging != VK_NULL_HANDLE) vkDestroyBuffer(device, texture_staging, nullptr);
+        if (texture_staging_memory != VK_NULL_HANDLE) vkFreeMemory(device, texture_staging_memory, nullptr);
+        texture_staging = VK_NULL_HANDLE;
+        texture_staging_memory = VK_NULL_HANDLE;
+        texture_staging_mapped = nullptr;
+        texture_staging_bytes = 0u;
 
-    VkCommandBufferAllocateInfo command_info{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-    command_info.commandPool = command_pool;
-    command_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    command_info.commandBufferCount = 1u;
-    VkCommandBuffer commands{};
-    vkAllocateCommandBuffers(device, &command_info, &commands);
+        VkBufferCreateInfo buffer_info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        buffer_info.size = bytes;
+        buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        if (vkCreateBuffer(device, &buffer_info, nullptr, &texture_staging) != VK_SUCCESS)
+            return give_up("no buffer");
+        VkMemoryRequirements requirements{};
+        vkGetBufferMemoryRequirements(device, texture_staging, &requirements);
+        VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        allocate.allocationSize = requirements.size;
+        allocate.memoryTypeIndex = find_memory_type(
+            requirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        if (vkAllocateMemory(device, &allocate, nullptr, &texture_staging_memory) != VK_SUCCESS) {
+            vkDestroyBuffer(device, texture_staging, nullptr);
+            texture_staging = VK_NULL_HANDLE;
+            return give_up("out of host memory");
+        }
+        if (vkBindBufferMemory(device, texture_staging, texture_staging_memory, 0u) != VK_SUCCESS)
+            return give_up("cannot bind");
+        if (vkMapMemory(device, texture_staging_memory, 0u, VK_WHOLE_SIZE, 0u, &texture_staging_mapped) !=
+                VK_SUCCESS ||
+            texture_staging_mapped == nullptr) {
+            texture_staging_mapped = nullptr;
+            return give_up("cannot map");
+        }
+        texture_staging_bytes = bytes;
+    }
+    const VkBuffer staging = texture_staging;
+    std::memcpy(texture_staging_mapped, pixels, static_cast<std::size_t>(bytes));
+
+    // Allocated once; the pool carries RESET_COMMAND_BUFFER_BIT, so it is
+    // reset and recorded again rather than allocated and freed per texture.
+    if (texture_commands == VK_NULL_HANDLE) {
+        VkCommandBufferAllocateInfo command_info{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+        command_info.commandPool = command_pool;
+        command_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        command_info.commandBufferCount = 1u;
+        if (vkAllocateCommandBuffers(device, &command_info, &texture_commands) != VK_SUCCESS)
+            return give_up("no command buffer");
+    }
+    const VkCommandBuffer commands = texture_commands;
+    vkResetCommandBuffer(commands, 0u);
     VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(commands, &begin);
@@ -3936,9 +3970,6 @@ VulkanRenderer::Impl::Texture VulkanRenderer::Impl::create_texture(std::uint32_t
         vkQueueWaitIdle(queue);
     }
     perf::add_wait_time(perf::Clock::now() - wait_start);
-    vkFreeCommandBuffers(device, command_pool, 1u, &commands);
-    vkDestroyBuffer(device, staging, nullptr);
-    vkFreeMemory(device, staging_memory, nullptr);
 
     VkDescriptorSetAllocateInfo descriptor_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
     descriptor_info.descriptorPool = descriptor_pool;
@@ -6574,6 +6605,9 @@ void VulkanRenderer::shutdown() {
     vkDestroySemaphore(impl.device, impl.render_finished, nullptr);
     vkDestroyFence(impl.device, impl.frame_fence, nullptr);
     vkDestroyFence(impl.device, impl.upload_fence, nullptr);
+    if (impl.texture_staging_mapped != nullptr) vkUnmapMemory(impl.device, impl.texture_staging_memory);
+    vkDestroyBuffer(impl.device, impl.texture_staging, nullptr);
+    vkFreeMemory(impl.device, impl.texture_staging_memory, nullptr);
     vkDestroyCommandPool(impl.device, impl.command_pool, nullptr);
     vkDestroySwapchainKHR(impl.device, impl.swapchain, nullptr);
     vkDestroyDevice(impl.device, nullptr);

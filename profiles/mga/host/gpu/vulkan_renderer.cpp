@@ -1327,9 +1327,26 @@ struct VulkanRenderer::Impl {
     // subtracts this instead, which does rise with every eviction.
     VkDeviceSize retired_bytes{};
     void destroy_retired_textures() {
-        for (Texture &texture : retired_textures) destroy_texture(texture);
-        retired_bytes = 0u;
-        retired_textures.clear();
+        // Budgeted, like the swap-in that feeds it. Each destroy is an image,
+        // a view, its memory and a descriptor set -- four driver calls -- and
+        // a stage's worth of replacements retires more than a hundred textures
+        // at once. Doing them all in one frame measured 122 ms with the guest
+        // stopped, and 2,712 frames of silence: the stall the asynchronous
+        // decode removed, moved one step further along.
+        //
+        // Taken from the back, which is as safe as the front: everything here
+        // was retired during a frame the fence above has already waited for,
+        // and anything left over only gets older.
+        constexpr std::size_t kDestroysPerFrame = 32u;
+        std::size_t done = 0u;
+        while (!retired_textures.empty() && done < kDestroysPerFrame) {
+            Texture &texture = retired_textures.back();
+            retired_bytes -= std::min(retired_bytes, texture.bytes);
+            destroy_texture(texture);
+            retired_textures.pop_back();
+            ++done;
+        }
+        if (retired_textures.empty()) retired_bytes = 0u;
     }
     void forget_bindings() {
         bound_pipeline = VK_NULL_HANDLE;

@@ -1,6 +1,7 @@
 // IoFileMgrForUser and sceUmdUser: UMD access straight from the disc image
 // (including raw "sce_lbn" sector files) and a host directory for ms0:.
 #include "hle_common.hpp"
+#include "perf/spike.hpp"
 #include "kernel/iso_image.hpp"
 
 #include "psprecomp/common.hpp"
@@ -255,6 +256,10 @@ void register_io(HleRegistrar &hle, const std::filesystem::path &disc_image, con
         OpenFile &file = found->second;
         const std::uint32_t address = arg(ctx, 1);
         std::uint32_t requested = arg(ctx, 2);
+        // Timed and counted: a stage load is thousands of these, and whether
+        // the cost is the reads themselves or what the game does with them is
+        // the difference between caching the disc and optimising the guest.
+        const perf::spike::Scope timing(perf::spike::Stage::FileIo);
         std::vector<std::uint8_t> buffer;
         if (file.kind == OpenFile::Kind::Disc) {
             const std::uint64_t available = file.position < file.size ? file.size - file.position : 0u;
@@ -270,6 +275,7 @@ void register_io(HleRegistrar &hle, const std::filesystem::path &disc_image, con
             buffer.resize(static_cast<std::size_t>(file.host->gcount()));
         }
         rt.memory().copy_in(address, buffer);
+        perf::spike::count_read(buffer.size());
         if (trace_io())
             std::cerr << "[io] read fd=" << arg(ctx, 0) << " " << file.path << " offset=" << file.position
                       << " size=" << buffer.size() << " -> " << psprecomp::hex32(address) << "\n";
@@ -291,6 +297,11 @@ void register_io(HleRegistrar &hle, const std::filesystem::path &disc_image, con
         const std::uint32_t address = arg(ctx, 1);
         const std::uint32_t size = arg(ctx, 2);
         if (fd == 1u || fd == 2u) {
+            // std::cerr is unbuffered, so this is a syscall per line. Timed
+            // because a game that chatters during a load pays for it here and
+            // nowhere the frame breakdown would otherwise show.
+            const perf::spike::Scope timing(perf::spike::Stage::Print);
+            perf::spike::count_print();
             std::string text(size, '\0');
             for (std::uint32_t i = 0; i < size; ++i) text[i] = static_cast<char>(rt.memory().load8(address + i));
             std::cerr << "[guest] " << text;

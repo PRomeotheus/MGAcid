@@ -36,6 +36,8 @@ enum class Stage {
     Scale,    // the renderer's own upscaling (texture_scale)
     Upload,   // create_texture: staging buffer, copy, descriptor set
     Pipeline, // vkCreateGraphicsPipelines for a blend/depth state not seen before
+    FileIo,   // sceIoRead and friends, which read the disc image
+    Print,    // the game's own debug output, one unbuffered write per line
     Count
 };
 
@@ -59,6 +61,10 @@ private:
 
 // One pipeline was compiled this frame.
 void count_pipeline();
+// Bytes the guest read from the disc this frame, and how many calls.
+void count_read(std::uint64_t bytes);
+// One line of guest debug output.
+void count_print();
 
 // Closes the frame: prints a line when it ran longer than MGA_STUTTER says,
 // then clears the accumulators. Called where the guest flips.

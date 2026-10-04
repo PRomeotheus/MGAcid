@@ -15,6 +15,9 @@ struct Frame {
     std::uint32_t misses{};
     std::uint32_t loaded{};
     std::uint32_t pipelines{};
+    std::uint32_t reads{};
+    std::uint64_t read_bytes{};
+    std::uint32_t prints{};
     Clock::time_point began{Clock::now()};
 };
 
@@ -57,6 +60,13 @@ void count_miss(bool loaded) {
 
 void count_pipeline() { ++frame().pipelines; }
 
+void count_read(std::uint64_t bytes) {
+    ++frame().reads;
+    frame().read_bytes += bytes;
+}
+
+void count_print() { ++frame().prints; }
+
 void end_frame() {
     static std::uint64_t index = 0u;
     ++index;
@@ -73,6 +83,11 @@ void end_frame() {
         }
         if (f.pipelines != 0u)
             std::cout << "  " << f.pipelines << " pipelines " << ms(f.stages[5]);
+        if (f.reads != 0u)
+            std::cout << "  io " << ms(f.stages[6]) << " (" << f.reads << " reads, "
+                      << (f.read_bytes / 1024u) << " KiB)";
+        if (f.prints != 0u)
+            std::cout << "  print " << ms(f.stages[7]) << " (" << f.prints << " lines)";
         // What the stages did not account for: guest code, the GPU, the kernel.
         double accounted = 0.0;
         for (const Clock::duration stage : f.stages) accounted += ms(stage);

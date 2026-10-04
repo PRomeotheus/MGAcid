@@ -744,6 +744,10 @@ struct VulkanRenderer::Impl {
     VkCommandBuffer shadow_command_buffer{};
     bool shadow_recorded{};
     VkFence frame_fence{};
+    // Waited on after a texture upload. Without it the upload used
+    // vkQueueWaitIdle, which waits for everything the queue holds -- including
+    // the frame being drawn -- rather than for the copy just submitted.
+    VkFence upload_fence{};
     VkSemaphore image_available{};
     VkSemaphore render_finished{};
     VkPresentModeKHR present_mode{VK_PRESENT_MODE_FIFO_KHR};
@@ -1992,6 +1996,9 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
     VkFenceCreateInfo fence_info{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     fence_info.flags = VK_FENCE_CREATE_SIGNALED_BIT;
     vkCreateFence(impl.device, &fence_info, nullptr, &impl.frame_fence);
+    // Unsignalled: create_texture waits for it and resets it each time.
+    VkFenceCreateInfo upload_fence_info{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    vkCreateFence(impl.device, &upload_fence_info, nullptr, &impl.upload_fence);
     VkSemaphoreCreateInfo semaphore_info{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
     vkCreateSemaphore(impl.device, &semaphore_info, nullptr, &impl.image_available);
     vkCreateSemaphore(impl.device, &semaphore_info, nullptr, &impl.render_finished);
@@ -3910,11 +3917,24 @@ VulkanRenderer::Impl::Texture VulkanRenderer::Impl::create_texture(std::uint32_t
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     submit.commandBufferCount = 1u;
     submit.pCommandBuffers = &commands;
-    // Uploads are synchronous: the GPU finishes everything queued before this
-    // returns, which counts as waiting rather than rendering.
+    // Uploads are synchronous -- the texture is drawn by the call that asked
+    // for it -- so this still waits. What it no longer does is wait for the
+    // whole queue.
+    //
+    // vkQueueWaitIdle blocks until everything the queue holds has finished,
+    // which during a frame means the drawing as well as this copy. A stage
+    // appearing uploads 151 textures in one frame, so that was 151 full GPU
+    // flushes, and the upload stage measured 202 ms of a 631 ms frame. A fence
+    // waits for this submission and nothing else.
     const perf::Clock::time_point wait_start = perf::Clock::now();
-    vkQueueSubmit(queue, 1u, &submit, VK_NULL_HANDLE);
-    vkQueueWaitIdle(queue);
+    const bool fenced = upload_fence != VK_NULL_HANDLE;
+    vkQueueSubmit(queue, 1u, &submit, fenced ? upload_fence : VK_NULL_HANDLE);
+    if (fenced) {
+        vkWaitForFences(device, 1u, &upload_fence, VK_TRUE, UINT64_MAX);
+        vkResetFences(device, 1u, &upload_fence);
+    } else {
+        vkQueueWaitIdle(queue);
+    }
     perf::add_wait_time(perf::Clock::now() - wait_start);
     vkFreeCommandBuffers(device, command_pool, 1u, &commands);
     vkDestroyBuffer(device, staging, nullptr);
@@ -6553,6 +6573,7 @@ void VulkanRenderer::shutdown() {
     vkDestroySemaphore(impl.device, impl.image_available, nullptr);
     vkDestroySemaphore(impl.device, impl.render_finished, nullptr);
     vkDestroyFence(impl.device, impl.frame_fence, nullptr);
+    vkDestroyFence(impl.device, impl.upload_fence, nullptr);
     vkDestroyCommandPool(impl.device, impl.command_pool, nullptr);
     vkDestroySwapchainKHR(impl.device, impl.swapchain, nullptr);
     vkDestroyDevice(impl.device, nullptr);

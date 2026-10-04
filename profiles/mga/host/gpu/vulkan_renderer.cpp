@@ -1310,6 +1310,10 @@ struct VulkanRenderer::Impl {
     // entries are retired so the next draw rebuilds them from the pack.
     std::unordered_map<std::uint64_t, std::vector<std::uint64_t>> awaiting_pack;
     std::uint64_t pack_replacements_applied{};
+    // Keys a worker has decoded, waiting to be swapped in. Held rather than
+    // applied at once: swapping one retires a texture and makes the next draw
+    // rebuild and re-upload it, and 115 of those in a frame is its own stall.
+    std::vector<std::uint64_t> pack_ready;
     // Textures that could not be given a descriptor set. Any number above zero
     // means geometry came out white that should have been textured, and the
     // pool is too small for how hard the cache is being worked.
@@ -5276,18 +5280,31 @@ void VulkanRenderer::begin_frame() {
     //
     // Done here and not when the decode lands, because the fence above is the
     // one moment a texture the GPU may have been reading is known to be idle.
-    for (const std::uint64_t pack_key : impl.texture_pack.completed()) {
-        const auto waiting = impl.awaiting_pack.find(pack_key);
-        if (waiting == impl.awaiting_pack.end()) continue;
-        for (const std::uint64_t texture_key : waiting->second) {
-            const auto found = impl.textures.find(texture_key);
-            if (found == impl.textures.end()) continue;
-            impl.retired_bytes += found->second.bytes;
-            impl.retired_textures.push_back(found->second);
-            impl.textures.erase(found);
-            ++impl.pack_replacements_applied;
+    {
+        const std::vector<std::uint64_t> landed = impl.texture_pack.completed();
+        impl.pack_ready.insert(impl.pack_ready.end(), landed.begin(), landed.end());
+        // A budget per frame. Every swap costs the next draw a rebuild and an
+        // upload, so applying a whole stage's worth at once just moves the
+        // stall one frame later -- which is what the second burst of silence
+        // was. At roughly a millisecond each this stays well inside a frame.
+        constexpr std::size_t kSwapsPerFrame = 24u;
+        std::size_t swapped = 0u;
+        auto key = impl.pack_ready.begin();
+        for (; key != impl.pack_ready.end() && swapped < kSwapsPerFrame; ++key) {
+            const auto waiting = impl.awaiting_pack.find(*key);
+            if (waiting == impl.awaiting_pack.end()) continue;
+            for (const std::uint64_t texture_key : waiting->second) {
+                const auto found = impl.textures.find(texture_key);
+                if (found == impl.textures.end()) continue;
+                impl.retired_bytes += found->second.bytes;
+                impl.retired_textures.push_back(found->second);
+                impl.textures.erase(found);
+                ++impl.pack_replacements_applied;
+                ++swapped;
+            }
+            impl.awaiting_pack.erase(waiting);
         }
-        impl.awaiting_pack.erase(waiting);
+        impl.pack_ready.erase(impl.pack_ready.begin(), key);
     }
     vkResetCommandBuffer(impl.command_buffer, 0u);
     VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};

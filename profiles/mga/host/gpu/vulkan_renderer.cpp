@@ -4165,6 +4165,7 @@ VulkanRenderer::Impl::Texture &VulkanRenderer::Impl::texture_for(const GuestMemo
     }
     if (pack_in_use) texture_pack.dump(pack_key, width, height, pixels.data());
     const PackedTexture *replacement = nullptr;
+    bool pack_on_the_way = false;
     if (texture_pack_enabled) {
         const perf::spike::Scope timing(perf::spike::Stage::Pack);
         // find_ready never decodes here: it returns what a worker has already
@@ -4173,6 +4174,12 @@ VulkanRenderer::Impl::Texture &VulkanRenderer::Impl::texture_for(const GuestMemo
         static const bool synchronous = std::getenv("MGA_SYNC_PACK") != nullptr;
         replacement = synchronous ? texture_pack.find(pack_key) : texture_pack.find_ready(pack_key);
         if (replacement == nullptr && !synchronous && pack_key != 0u) {
+            // A replacement is on its way, so the renderer's own enlargement
+            // of this texture would be thrown away with it. Skipping it is
+            // what makes the two features cost one rather than both: with a
+            // near-complete pack, 144 of the 151 textures on a stage change
+            // were being scaled and then replaced.
+            pack_on_the_way = texture_pack.pending(pack_key);
             // One entry per cache key. The same texture misses every frame
             // until its replacement lands, and several addresses can share a
             // pack key, so this is a small set rather than a push each time.
@@ -4204,7 +4211,7 @@ VulkanRenderer::Impl::Texture &VulkanRenderer::Impl::texture_for(const GuestMemo
         pixels = replacement->pixels;
         width = replacement->width;
         height = replacement->height;
-    } else if (texture_scale > 1u && !rewritten_in_place) {
+    } else if (texture_scale > 1u && !rewritten_in_place && !pack_on_the_way) {
         const perf::spike::Scope timing(perf::spike::Stage::Scale);
         (void)scale_texture(pixels, width, height, texture_scale,
                             texture_scale_sharp ? TextureScaleMode::Sharp : TextureScaleMode::Smooth);

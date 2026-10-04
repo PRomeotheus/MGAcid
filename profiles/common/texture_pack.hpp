@@ -80,6 +80,11 @@ public:
     // Keys decoded since the last call, and cleared by it. Called once a frame.
     [[nodiscard]] std::vector<std::uint64_t> completed();
 
+    // True while a worker still owes an answer for this key. The caller uses
+    // it to skip work the replacement is about to make pointless -- enlarging
+    // a texture that is a frame away from being thrown out for a better one.
+    [[nodiscard]] bool pending(std::uint64_t key) const;
+
     // Turns dumping on. Every texture decoded from then on is written once.
     void set_dumping(bool on);
     [[nodiscard]] bool dumping() const noexcept { return dumping_; }

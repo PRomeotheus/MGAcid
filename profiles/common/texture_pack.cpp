@@ -388,6 +388,12 @@ const PackedTexture *TexturePack::find_ready(std::uint64_t key) {
 #endif
 }
 
+bool TexturePack::pending(std::uint64_t key) const {
+    Decoder &d = decoder();
+    std::lock_guard<std::mutex> lock(d.mutex);
+    return d.queued.count(key) != 0u || d.ready.count(key) != 0u;
+}
+
 std::vector<std::uint64_t> TexturePack::completed() {
     Decoder &d = decoder();
     std::lock_guard<std::mutex> lock(d.mutex);

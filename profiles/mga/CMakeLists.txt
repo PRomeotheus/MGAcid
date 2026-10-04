@@ -116,6 +116,7 @@ set(MGA_HOST_SOURCES
     "${PSP_COMMON_DIR}/texture_pack.cpp"
     "${PSP_COMMON_DIR}/texture_scale.cpp"
     host/perf/frame_stats.cpp
+    host/perf/spike.cpp
     host/perf/perf_overlay.cpp
     host/overlays.cpp
     host/mga_profile.cpp

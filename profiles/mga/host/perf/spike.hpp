@@ -1,0 +1,67 @@
+#pragma once
+
+// MGA_STUTTER: say what a long frame was spent on.
+//
+// The average frame time says nothing about a stutter, because a stutter is
+// one frame in a hundred and the average hides it. This times the stages of
+// the texture miss path -- the only work in this port that is unbounded, done
+// on the render thread, and triggered by content appearing for the first time
+// -- and prints a line when a frame runs long:
+//
+//   MGA_STUTTER=20 ./MGAcid        # report any frame over 20 ms
+//
+//   [stutter] frame 1483  118.4 ms  31 new textures: decode 9.2, key 2.1,
+//             pack 94.7 (28 loaded), scale 7.8, upload 4.1  2 pipelines 61.3
+//
+// The numbers are milliseconds inside that frame. Anything the stages do not
+// account for is guest code, the GPU or the kernel, and shows as the gap
+// between the frame time and their sum.
+//
+// Costs two clock reads per texture miss, and a miss already decodes and
+// uploads an image, so it is left in rather than compiled out. With
+// MGA_STUTTER unset nothing is printed and the accumulators are still
+// summed, which is a handful of additions per frame.
+
+#include <chrono>
+#include <cstdint>
+
+namespace mga::perf::spike {
+
+using Clock = std::chrono::steady_clock;
+
+enum class Stage {
+    Decode,   // guest texels -> RGBA (decode_texture, including unswizzle and CLUT)
+    Key,      // content_key: one pass over the decoded texels
+    Pack,     // TexturePack::find, which decodes a PNG from disk on a hit
+    Scale,    // the renderer's own upscaling (texture_scale)
+    Upload,   // create_texture: staging buffer, copy, descriptor set
+    Pipeline, // vkCreateGraphicsPipelines for a blend/depth state not seen before
+    Count
+};
+
+// Adds to this frame's total for `stage`.
+void add(Stage stage, Clock::duration duration);
+// One texture missed the cache this frame; `loaded` when the pack replaced it.
+void count_miss(bool loaded);
+
+// Times a stage for as long as it is alive.
+class Scope {
+public:
+    explicit Scope(Stage stage) : stage_(stage), start_(Clock::now()) {}
+    ~Scope() { add(stage_, Clock::now() - start_); }
+    Scope(const Scope &) = delete;
+    Scope &operator=(const Scope &) = delete;
+
+private:
+    Stage stage_;
+    Clock::time_point start_;
+};
+
+// One pipeline was compiled this frame.
+void count_pipeline();
+
+// Closes the frame: prints a line when it ran longer than MGA_STUTTER says,
+// then clears the accumulators. Called where the guest flips.
+void end_frame();
+
+} // namespace mga::perf::spike

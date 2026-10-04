@@ -17,6 +17,7 @@
 
 #include "gpu/ge_state.hpp"
 #include "perf/frame_stats.hpp"
+#include "perf/spike.hpp"
 #if defined(MGA_HAS_RENDERER)
 #include "gpu/frame_record.hpp"
 #include "gpu/vulkan_renderer.hpp"
@@ -542,6 +543,7 @@ void present_frame(Runtime &rt) {
     if (!media().renderer || !media().renderer->available()) {
         frame_record().clear();
         perf::end_frame(kernel().now_us());
+        perf::spike::end_frame();
         kernel().calibrate_cpu_scale();
         report_display_trace();
         return;
@@ -598,6 +600,7 @@ void present_frame(Runtime &rt) {
     perf::add_render_time(perf::Clock::now() - present_start);
     // A frame ends when its image has been handed to the swapchain.
     perf::end_frame(kernel().now_us());
+        perf::spike::end_frame();
     kernel().calibrate_cpu_scale();
     report_display_trace();
 
@@ -669,6 +672,7 @@ void present_frame(Runtime &rt) {
 #else
     (void)rt;
     perf::end_frame(kernel().now_us());
+        perf::spike::end_frame();
     kernel().calibrate_cpu_scale();
     report_display_trace();
 #endif

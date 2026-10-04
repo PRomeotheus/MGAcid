@@ -8,6 +8,7 @@
 
 #include "install/user_data.hpp"
 #include "perf/frame_stats.hpp"
+#include "perf/spike.hpp"
 #include "perf/perf_overlay.hpp"
 #include "settings/settings.hpp"
 
@@ -3972,7 +3973,10 @@ VulkanRenderer::Impl::Texture &VulkanRenderer::Impl::texture_for(const GuestMemo
         return found->second;
     }
     std::vector<std::uint32_t> pixels;
-    if (!decode_texture(memory, state, pixels) || pixels.empty()) return white_texture;
+    {
+        const perf::spike::Scope timing(perf::spike::Stage::Decode);
+        if (!decode_texture(memory, state, pixels) || pixels.empty()) return white_texture;
+    }
 
     // Room for one more, by count and by size. The size is what matters once
     // a texture pack is loaded: a thousand 2048x2048 replacements would ask
@@ -4076,9 +4080,18 @@ VulkanRenderer::Impl::Texture &VulkanRenderer::Impl::texture_for(const GuestMemo
     // window, and no pack entry will ever match a picture the game composes
     // fresh, so the lookup is wasted too.
     const bool pack_in_use = (texture_pack.dumping() || texture_pack_enabled) && !rewritten_in_place;
-    const std::uint64_t pack_key = pack_in_use ? content_key(width, height, pixels.data()) : 0u;
+    std::uint64_t pack_key = 0u;
+    if (pack_in_use) {
+        const perf::spike::Scope timing(perf::spike::Stage::Key);
+        pack_key = content_key(width, height, pixels.data());
+    }
     if (pack_in_use) texture_pack.dump(pack_key, width, height, pixels.data());
-    const PackedTexture *replacement = texture_pack_enabled ? texture_pack.find(pack_key) : nullptr;
+    const PackedTexture *replacement = nullptr;
+    if (texture_pack_enabled) {
+        const perf::spike::Scope timing(perf::spike::Stage::Pack);
+        replacement = texture_pack.find(pack_key);
+    }
+    perf::spike::count_miss(replacement != nullptr);
     if (replacement != nullptr) {
         // Someone has drawn this at a resolution of their choosing, so the
         // renderer's own upscaling has no business enlarging it further.
@@ -4086,9 +4099,11 @@ VulkanRenderer::Impl::Texture &VulkanRenderer::Impl::texture_for(const GuestMemo
         width = replacement->width;
         height = replacement->height;
     } else if (texture_scale > 1u && !rewritten_in_place) {
+        const perf::spike::Scope timing(perf::spike::Stage::Scale);
         (void)scale_texture(pixels, width, height, texture_scale,
                             texture_scale_sharp ? TextureScaleMode::Sharp : TextureScaleMode::Smooth);
     }
+    const perf::spike::Scope upload_timing(perf::spike::Stage::Upload);
     Texture texture = create_texture(width, height, pixels.data());
     texture.from_pack = replacement != nullptr;
     if (texture.descriptor == VK_NULL_HANDLE) {
@@ -4478,8 +4493,15 @@ VkPipeline VulkanRenderer::Impl::pipeline_for(const PipelineKey &key) {
     info.layout = pipeline_layout;
     info.renderPass = render_pass;
     VkPipeline pipeline{};
-    if (vkCreateGraphicsPipelines(device, pipeline_cache, 1u, &info, nullptr, &pipeline) != VK_SUCCESS)
-        return VK_NULL_HANDLE;
+    {
+        // The driver compiles here, on the render thread, the first time the
+        // game uses a blend and depth combination. That is a scene change, and
+        // a scene change is where the stutters are.
+        const perf::spike::Scope timing(perf::spike::Stage::Pipeline);
+        if (vkCreateGraphicsPipelines(device, pipeline_cache, 1u, &info, nullptr, &pipeline) != VK_SUCCESS)
+            return VK_NULL_HANDLE;
+    }
+    perf::spike::count_pipeline();
     pipelines.emplace(key, pipeline);
     // The driver has compiled something new, so the cache on disk is behind.
     // Written out when the renderer shuts down rather than here: this runs in

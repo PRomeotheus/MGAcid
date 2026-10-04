@@ -1,4 +1,5 @@
 #include "audio/audio_sink.hpp"
+#include "perf/spike.hpp"
 
 #include "settings/settings.hpp"
 
@@ -126,6 +127,10 @@ struct AudioSink::Impl {
     void retire(std::size_t count, std::int16_t *out, bool played) {
         const std::uint64_t available = write_end > read_position ? write_end - read_position : 0u;
         const std::uint64_t silent = count > available ? count - available : 0u;
+        // The ring holds ~186 ms. Anything past that is the device playing
+        // nothing because the guest has not produced yet, which is the skip
+        // heard during a stage load.
+        if (silent != 0u && played) perf::spike::count_silence(silent);
         for (std::size_t frame = 0; frame < count; ++frame) {
             const std::size_t slot = static_cast<std::size_t>((read_position + frame) % kRingFrames) * kChannels;
             const std::int16_t left = ring[slot];

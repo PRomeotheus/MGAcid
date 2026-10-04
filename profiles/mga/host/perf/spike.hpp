@@ -66,8 +66,17 @@ void count_read(std::uint64_t bytes);
 // One line of guest debug output.
 void count_print();
 
+// Frames of silence the audio device played because the ring was empty.
+void count_silence(std::uint64_t frames);
+
 // Closes the frame: prints a line when it ran longer than MGA_STUTTER says,
 // then clears the accumulators. Called where the guest flips.
-void end_frame();
+//
+// `virtual_us` is the kernel's clock. Printed against the real time the frame
+// took, because the two coming apart is its own kind of fault: the guest can
+// only generate as much audio as its clock says has passed, so a burst that
+// costs a second of real time and advances the guest by twenty milliseconds
+// starves the sink no matter how often its threads are scheduled.
+void end_frame(std::uint64_t virtual_us);
 
 } // namespace mga::perf::spike

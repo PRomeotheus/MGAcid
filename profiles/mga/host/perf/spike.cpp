@@ -18,6 +18,8 @@ struct Frame {
     std::uint32_t reads{};
     std::uint64_t read_bytes{};
     std::uint32_t prints{};
+    std::uint64_t silence{};
+    std::uint64_t virtual_us{};
     Clock::time_point began{Clock::now()};
 };
 
@@ -67,10 +69,15 @@ void count_read(std::uint64_t bytes) {
 
 void count_print() { ++frame().prints; }
 
-void end_frame() {
+void count_silence(std::uint64_t frames) { frame().silence += frames; }
+
+void end_frame(std::uint64_t virtual_us) {
     static std::uint64_t index = 0u;
+    static std::uint64_t last_virtual_us = 0u;
     ++index;
     Frame &f = frame();
+    const std::uint64_t guest_us = virtual_us > last_virtual_us ? virtual_us - last_virtual_us : 0u;
+    last_virtual_us = virtual_us;
     const Clock::time_point now = Clock::now();
     const double total = ms(now - f.began);
     const double limit = threshold_ms();
@@ -88,6 +95,8 @@ void end_frame() {
                       << (f.read_bytes / 1024u) << " KiB)";
         if (f.prints != 0u)
             std::cout << "  print " << ms(f.stages[7]) << " (" << f.prints << " lines)";
+        std::cout << "  guest " << (static_cast<double>(guest_us) / 1000.0) << " ms";
+        if (f.silence != 0u) std::cout << "  SILENCE " << f.silence << " frames";
         // What the stages did not account for: guest code, the GPU, the kernel.
         double accounted = 0.0;
         for (const Clock::duration stage : f.stages) accounted += ms(stage);

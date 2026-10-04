@@ -32,6 +32,7 @@
 #include <sstream>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -4143,6 +4144,23 @@ VulkanRenderer::Impl::Texture &VulkanRenderer::Impl::texture_for(const GuestMemo
         replacement = texture_pack.find(pack_key);
     }
     perf::spike::count_miss(replacement != nullptr);
+    // MGA_PACK_MISS: why a texture the pack could have replaced did not get
+    // one. The two answers need different fixes, and from outside the program
+    // they look the same -- the file is in the folder and the game ignores it.
+    static const bool trace_pack_miss = std::getenv("MGA_PACK_MISS") != nullptr;
+    if (trace_pack_miss && texture_pack_enabled && replacement == nullptr) {
+        static std::set<std::uint64_t> reported;
+        if (rewritten_in_place) {
+            // pack_key was never computed, so there is nothing to print but the
+            // address: the lookup was skipped, not attempted.
+            if (reported.insert(0x1'0000'0000ull | state.address).second)
+                std::cout << "[pack] " << width << "x" << height << " at 0x" << std::hex << state.address
+                          << std::dec << ": skipped, the game rewrites this address\n";
+        } else if (reported.insert(pack_key).second) {
+            std::cout << "[pack] " << width << "x" << height << " no entry for "
+                      << TexturePack::key_name(pack_key) << "\n";
+        }
+    }
     if (replacement != nullptr) {
         // Someone has drawn this at a resolution of their choosing, so the
         // renderer's own upscaling has no business enlarging it further.

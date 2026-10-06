@@ -1,8 +1,7 @@
 # Metal Gear Ac!d profile (ULUS-10006)
 
 A static recompilation of **Metal Gear Ac!d** (USA, `ULUS-10006`) on the
-PSPRecomp framework, built from Yakumo's MHP3rd host. The target platforms are
-Windows and Linux (Steam Deck).
+PSPRecomp framework. The target platforms are Windows and Linux (Steam Deck).
 
 Nothing from the game is in this repository. You need your own disc image.
 
@@ -15,16 +14,16 @@ Nothing from the game is in this repository. You need your own disc image.
   and run through the interpreter until they get recompiled corpora.
 - Sony's libraries on the disc (`sce*` module names) stay on the host HLE.
 
-The host code under `host/` started as a mechanical copy of
-`profiles/mhp3rd/host` (namespace `mhp3rd` → `mga`, `MHP3RD_*` → `MGA_*`).
-Much of it is still MHP3rd-specific (save data, fonts, ad hoc, the in-game
-menu texts) and is adapted as the game needs it. `profiles/mhp3rd/README.md`
-documents the host features and diagnostics it inherited; the environment
-variables there work here with the `MGA_` prefix.
+The host code under `host/` began as a copy of the Monster Hunter Portable
+3rd host from [Yakumo](https://github.com/TeamGDB/Yakumo) (namespace `mhp3rd`
+→ `mga`, `MHP3RD_*` → `MGA_*`), which is where most of the kernel, renderer,
+audio and save-data code comes from. That profile is no longer in this tree;
+what remains of it here has been retargeted at Ac!d as the game needed it. The
+ad hoc networking is the exception: it is the other game's and is unused.
 
 ## Build
 
-Same toolchain as Yakumo: see [`docs/BUILDING.md`](../../docs/BUILDING.md).
+See [`docs/BUILDING.md`](../../docs/BUILDING.md).
 On Windows, run these in Git Bash started from the x64 Native Tools prompt.
 
 ```bash
@@ -113,5 +112,4 @@ a dump. The script names the stages it has no dump for.
   boundary may charge, a guard against host stalls rather than a tuning knob.
 - `MGA_DUMP_MODULES=<dir>` — write each loaded module's memory, after the game has linked it.
   `scripts/generate_modules.sh` recompiles the stages from these dumps.
-- `MGA_TRACE_IO=1`, `MGA_TRACE_SYNC=1` and the other `*_TRACE_*` switches from the
-  MHP3rd README.
+- `MGA_TRACE_IO=1`, `MGA_TRACE_SYNC=1` and the other `MGA_TRACE_*` switches.

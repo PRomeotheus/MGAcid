@@ -253,7 +253,7 @@ void start_backup(const fs::path &target) {
 bool browse(bool back) {
     State &s = state();
     ImGui::Indent(px(16.0f));
-    paragraph(s.stage == Stage::ChooseImport ? "Import: open a save folder (ULJM05800, ULJM05800QST), or choose a "
+    paragraph(s.stage == Stage::ChooseImport ? "Import: open a save folder (ULUS10006001 and so on), or choose a "
                                                "folder that holds them, such as a memory stick's PSP/SAVEDATA."
               : s.stage == Stage::ChooseExport ? "Export: choose the folder to copy your saves to."
                                                : "Back up: choose the folder the backup goes to.",
@@ -303,8 +303,8 @@ void review_screen(bool back) {
     ImGui::Indent(px(16.0f));
     paragraph("From " + utf8(s.picked), colors::kTextDim);
     if (s.found.empty())
-        paragraph("No saves of Monster Hunter Portable 3rd were found in this folder. Choose a save folder such as "
-                  "ULJM05800, or the PSP/SAVEDATA folder that holds it.",
+        paragraph("No saves of Metal Gear Ac!d were found in this folder. Choose a save folder such as "
+                  "ULUS10006001, or the PSP/SAVEDATA folder that holds it.",
                   colors::kDanger);
     if (s.other_games > 0)
         paragraph(std::to_string(s.other_games) + (s.other_games == 1 ? " save belongs" : " saves belong") +
@@ -501,7 +501,7 @@ void save_rows() {
     }
     if (button_row("Import save…", {!available, {},
                                      "Copy a save from a PSP memory stick, PPSSPP or another installation: choose "
-                                     "its folder (ULJM05800, ULJM05800QST) or the PSP/SAVEDATA folder that holds "
+                                     "its folder (ULUS10006001 and so on) or the PSP/SAVEDATA folder that holds "
                                      "it. A save it replaces is kept, not deleted."}))
         open_browser(Stage::ChooseImport);
     if (button_row("Export save…", {!available, {},

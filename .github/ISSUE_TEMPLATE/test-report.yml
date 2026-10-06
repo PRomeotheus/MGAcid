@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for testing. Run through [the smoke test](https://github.com/TeamGDB/Yakumo/blob/main/docs/TESTING.md) and fill this in. Please do not attach or link any part of the game, including screenshots of copyrighted assets beyond what is needed to show a problem.
+        Thanks for testing. Run through [the smoke test](https://github.com/PRomeotheus/MGAcid/blob/main/docs/TESTING.md) and fill this in. Please do not attach or link any part of the game, including screenshots of copyrighted assets beyond what is needed to show a problem.
   - type: input
     id: commit
     attributes:

@@ -30,9 +30,9 @@ The game boots, plays and saves. The parts below are what has actually been exer
 
 | Works | Rough or unverified |
 | --- | --- |
-| Booting, the title screen, menus and the stages reached so far | Compatibility has not been mapped stage by stage |
-| The game's own save data, in the PSP's format | The save-data dialogs are inherited from the upstream profile and are not fully adapted |
-| 3D models, animation, textures, transparency and lighting | Curved surfaces are approximated |
+| Booting, the title screen, menus and the stages played so far | The game has not been played end to end, and not every card has been exercised, but no issue has been found so far |
+| The game's own save data, in the PSP's format, with the save dialogs the game opens | Importing, exporting and backing up saves target Ac!d's own slots, but no real transfer has been tried yet |
+| 3D models, animation, textures, transparency and lighting | Bezier and spline patches are not drawn; nothing yet shows that Ac!d asks for any |
 | Sound effects and streamed ATRAC3plus music | |
 | Replacement music: your own recordings in place of the game's cues, switchable while a track plays | |
 | A replacement texture pack, with optional 2x–4x upscaling and an edge-preserving filter for art drawn texel by texel | |
@@ -112,7 +112,6 @@ tools/               Framework: analyzer and C++ code generator
 tests/               Framework regression tests
 profiles/mga/        Everything specific to Metal Gear Ac!d: host, kernel,
                      renderer, audio, input, configuration and build scripts
-profiles/mhp3rd/     The upstream profile this one was derived from
 docs/                Architecture, archive format, profile guide, source rules
 ```
 
@@ -120,7 +119,7 @@ The recompiled code itself is generated locally from your copy of the game and i
 
 ## Built on PSPRecomp
 
-**MGAcid** is built on [PSPRecomp](https://github.com/jessicanataliagta/PSPRecomp), a static recompilation framework for PSP software, and started from [Yakumo](https://github.com/TeamGDB/Yakumo), its Monster Hunter Portable 3rd HD port, whose host layer this profile was derived from. That profile is still in the tree and keeps its own README.
+**MGAcid** is built on [PSPRecomp](https://github.com/jessicanataliagta/PSPRecomp), a static recompilation framework for PSP software, and started from [Yakumo](https://github.com/TeamGDB/Yakumo), its Monster Hunter Portable 3rd HD port, whose host layer this one was derived from. That port is a separate project; none of its code for its own game is in this repository.
 
 ## Credits
 

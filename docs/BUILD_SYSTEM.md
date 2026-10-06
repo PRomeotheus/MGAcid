@@ -11,9 +11,9 @@ proxy for the generated units (section 5). Tools: Ninja 1.13.2 and CMake
 | Observed failure | Root cause | Confidence |
 |---|---|---|
 | 1. `premature end of file; recovering`, then a full rebuild | Two Ninja processes appended to the same `.ninja_deps`. Ninja detects this and truncates the log at the first bad record, so every dependency record after that point is lost. Ninja 1.13.2 also has a recovery bug (upstream #2703, fixed on master and not yet released) that keeps the bad record, so the damage comes back on **every** build — which is how a checkout ends up rebuilding everything on every run. | High: reproduced exactly. |
-| 2. Several Ninjas in one directory, load average above 100 | (a) `add_overlay.py` calls `cmake --build` without `-j`, so Ninja uses its default of 10 jobs. (b) On macOS every overlay target depends on `Yakumo`, so building one overlay against a stale host compiles all 89 generated units at `-j10`. (c) Killing `cmake --build` or a Python wrapper leaves its Ninja running as an orphan, and the next build then runs alongside it. | High: (a) and (b) come from the build files and a live sample, (c) was reproduced. |
+| 2. Several Ninjas in one directory, load average above 100 | (a) `add_overlay.py` calls `cmake --build` without `-j`, so Ninja uses its default of 10 jobs. (b) On macOS every overlay target depends on `MGAcid`, so building one overlay against a stale host compiles all 77 generated units at `-j10`. (c) Killing `cmake --build` or a Python wrapper leaves its Ninja running as an orphan, and the next build then runs alongside it. | High: (a) and (b) come from the build files and a live sample, (c) was reproduced. |
 | 3. `no work to do` after a real edit | It is **not** the edit-during-build race: Ninja ≥ 1.12 catches that, and the synthetic tests confirm it. It is **not** timestamp resolution either: APFS and Ninja both use nanoseconds. Two causes produce it. Another Ninja — for example one building overlays, which depend on the host — may already have compiled the edit, in which case `no work to do` is correct. Or the file arrived with an older mtime than its object, through a copy that preserves timestamps (`cp -p`, `rsync -a`, `tar`). | Medium: both reproduced; which one caused a given case cannot always be told from the logs. |
-| 4. "Rebuilds from zero after an error" | Interrupting Ninja does **not** do this: after SIGKILL, SIGINT, SIGTERM or a killed compiler job, only the unfinished edges are rebuilt. The full rebuilds come from (i) the deps-log truncation in item 1, which happens when the build after an interrupted one runs alongside the orphaned Ninja from item 2(c); (ii) the remedy of deleting `.ninja_deps` and `.ninja_log`; and (iii) `generate.sh`, which runs `rm -rf generated` and so gives all 89 units new mtimes even when their content has not changed. | High for (ii) and (iii). (i) is reproduced but not proven for each past case. |
+| 4. "Rebuilds from zero after an error" | Interrupting Ninja does **not** do this: after SIGKILL, SIGINT, SIGTERM or a killed compiler job, only the unfinished edges are rebuilt. The full rebuilds come from (i) the deps-log truncation in item 1, which happens when the build after an interrupted one runs alongside the orphaned Ninja from item 2(c); (ii) the remedy of deleting `.ninja_deps` and `.ninja_log`; and (iii) `generate.sh`, which runs `rm -rf generated` and so gives all 77 units new mtimes even when their content has not changed. | High for (ii) and (iii). (i) is reproduced but not proven for each past case. |
 
 **Recommendation: keep Ninja.** Everything observed can be fixed with a lock, a
 compiler cache and a Ninja upgrade. None of the alternatives fixes an observed
@@ -27,7 +27,7 @@ problem that these do not. Ranked by payoff over effort:
    released when Ninja exits, not when its parent does. Effort: one file plus
    one cache variable. This removes the cause of items 1 and 2(c) and the
    concurrency behind item 4.
-2. **ccache.** A full rebuild of the 89 units from a warm cache took **1.2 s**
+2. **ccache.** A full rebuild of the 77 units from a warm cache took **1.2 s**
    in the measurement below; a cold rebuild takes about **14 minutes** on the
    development machine. Lost logs, `ninja -t clean`, regenerated sources and
    the item-3 `touch` then cost seconds. Effort: `brew install ccache` and one
@@ -65,8 +65,8 @@ The build now implements ranks 1 to 5 and the `generate.sh` fix from item 4.
 | Repair of a damaged `.ninja_deps` before each build (rank 4) | the same wrapper | on together with the lock | as above |
 | Warning for Ninja 1.13.2 (rank 4) | `cmake/BuildLock.cmake` | once per build directory | — |
 | ccache (rank 2) | top-level `CMakeLists.txt` | used when installed | `-DPSPRECOMP_CCACHE=OFF` |
-| Path defines only on `host/main.cpp` (item 4.4) | `profiles/mhp3rd/CMakeLists.txt` | — | — |
-| Job pool for generated code (rank 3) | `psprecomp_generated` pool, `JOB_POOL_COMPILE` on `Yakumo` and every overlay | one job per 4 GiB of memory, at least 1 | `-DPSPRECOMP_GENERATED_JOBS=N` |
+| Path defines only on `host/main.cpp` (item 4.4) | `profiles/mga/CMakeLists.txt` | — | — |
+| Job pool for generated code (rank 3) | `psprecomp_generated` pool, `JOB_POOL_COMPILE` on `MGAcid` and every overlay | one job per 4 GiB of memory, at least 1 | `-DPSPRECOMP_GENERATED_JOBS=N` |
 | Explicit `-j` in `add_overlay.py` (rank 3) | `add_overlay.py -j N` | 2 | `-j N` |
 | No per-overlay reconfigure, one Ninja for all overlays (rank 5) | `add_overlay.py --no-build`, `build_overlays.sh [build_dir] [jobs]` | 2 jobs | second argument |
 | Regeneration keeps unchanged units (item 4.3) | `generate.sh` | — | — |
@@ -100,7 +100,7 @@ How they behave:
   it and a checkout at another path gets direct-mode hits. Older versions get
   plain `ccache`; set `base_dir` in the ccache configuration for them.
 - **Job pool.** CMake 4.3 sets `JOB_POOL_COMPILE` per target, so the host
-  sources of `Yakumo` share the pool with the generated units. The
+  sources of `MGAcid` share the pool with the generated units. The
   Makefile and Visual Studio generators ignore job pools.
 
 ### Ninja 1.13.2
@@ -110,7 +110,7 @@ should not happen. If it does, for example after a direct `ninja` call, the
 wrapper repairs it before the next `cmake --build`. To repair a log by hand:
 
 ```bash
-ninja -C out/mhp3rd -t recompact
+ninja -C out/mga -t recompact
 ```
 
 The lasting fix is Ninja 1.14.0 once it is released, or Ninja from master until then
@@ -119,12 +119,12 @@ build directory when it finds 1.13.2.
 
 ### Measured on the real tree
 
-Ninja 1.13.2, ccache 4.14, 8 GB of memory, `-j 2`, 89 generated units plus
+Ninja 1.13.2, ccache 4.14, 8 GB of memory, `-j 2`, 77 generated units plus
 the host.
 
 | Check | Result |
 |---|---|
-| Cold build of `Yakumo` (empty cache) | 708 s, never more than 2 compiler processes |
+| Cold build of `MGAcid` (empty cache) | 708 s, never more than 2 compiler processes |
 | Second `cmake --build` started during it | waited 697 s, then `no work to do` |
 | `.ninja_deps` and `.ninja_log` deleted, rebuild from a warm cache | 1.7 s, 117 of 117 direct hits |
 | `ninja -t clean`, rebuild | 1.6 s |
@@ -250,14 +250,14 @@ harmless and can be deleted.
   `clang -cc1` jobs, a load average of 98 and 3.0 GB of swap in use on 8 GB. So
   one `add_overlay.py` is enough to reach load averages near 100. Two or three
   Ninjas make it worse.
-- On macOS (and Windows), each overlay module links against `Yakumo`,
+- On macOS (and Windows), each overlay module links against `MGAcid`,
   which it uses as the bundle loader or import library. In a configured tree, `ninja -t inputs overlay_<x>` lists **all 89 generated
   host units and 18 host sources**. If the host is stale, whether from an edit
   or a lost deps log, the first `add_overlay.py` rebuilds it at `-j10`. At
   more than 1 GB per unit that is over 10 GB of demand on an 8 GB machine.
   `bootstrap_overlays.sh` uses `-j 3`; the other entry points use the default.
 - Each host relink also relinks every overlay module on the next full build
-  (implicit dependency on `bin/Yakumo`). That part is cheap: the median
+  (implicit dependency on `bin/MGAcid`). That part is cheap: the median
   module link is 0.075 s.
 
 ## 3. Item 3: `no work to do` after an edit
@@ -299,10 +299,10 @@ full rebuilds that were seen come from:
    deleting `.ninja_log` does too (`command line not found in log`).
    `ninja -t recompact` keeps every record before the corruption point, so it
    is never worse than deleting.
-3. **`generate.sh`** runs `rm -rf generated` before `psp_recomp`. All 89 units
+3. **`generate.sh`** runs `rm -rf generated` before `psp_recomp`. All 77 units
    get new mtimes even when the output is byte-identical.
-4. **Target-wide absolute-path defines.** `MHP3RD_DEFAULT_GAME_DIR` and
-   `MHP3RD_NIDS_CSV` are set on the whole `Yakumo` target, so they are
+4. **Target-wide absolute-path defines.** `MGA_DEFAULT_GAME_DIR` and
+   `MGA_NIDS_CSV` are set on the whole `MGAcid` target, so they are
    on every generated unit's command line. Any change to them, such as moving
    the checkout, changes 89 command lines. This also costs cache hits across
    worktrees (section 5).
@@ -311,16 +311,16 @@ full rebuilds that were seen come from:
 ## 5. Mitigation: compiler cache (measured)
 
 The generated corpus was not built, as the rules required. Instead, a proxy was
-built: 89 units that each include `psprecomp/runtime.hpp` and the same system
+built: 77 units that each include `psprecomp/runtime.hpp` and the same system
 headers as a real unit, which is about 1000 headers. Each also holds a
 97 000-entry table, giving 1.9 MB of source per unit (real: 0.93 MB) and
 776 680 bytes of object (real: 0.78 MB average). A cache hit costs the same no
 matter how long the miss took to compile, so hashing and copying are what the
 proxy has to match, and it matches or exceeds the real units on both. The proxy
-also carries an absolute-path define, like `MHP3RD_DEFAULT_GAME_DIR`. All runs
+also carries an absolute-path define, like `MGA_DEFAULT_GAME_DIR`. All runs
 used `-j2`, on a machine busy with another build.
 
-| Run (89 units + main + link) | Time | ccache |
+| Run (77 units + main + link) | Time | ccache |
 |---|---|---|
 | A. no cache, full build | 54.4 s | — |
 | B. ccache, cold cache | 52.8 s | 0 / 90 hits |
@@ -378,7 +378,7 @@ Measured in the synthetic project:
 
 The kernel releases a `flock` when the holder dies, so a `kill -9` never leaves
 a stale lock. `ninja -t …`, `-n` and `--version` pass straight through. Only a
-direct `ninja -C out/mhp3rd` bypasses the lock. A build step that ran
+direct `ninja -C out/mga` bypasses the lock. A build step that ran
 `cmake --build` on its own directory would deadlock; nothing in the project
 does that today. On Windows the same wrapper needs `msvcrt.locking` and a
 `.bat` shim, because `CMAKE_MAKE_PROGRAM` must be an executable. A lock that
@@ -394,7 +394,7 @@ per-overlay loop can stay as the resume mechanism for the recompile step.
 
 **Bounded parallelism.** A job pool for the generated units, for example
 `set_property(GLOBAL APPEND PROPERTY JOB_POOLS aot=2)` and
-`JOB_POOL_COMPILE aot` on `Yakumo` and the overlay targets, caps the
+`JOB_POOL_COMPILE aot` on `MGAcid` and the overlay targets, caps the
 expensive compiles in every invocation, whatever `-j` the caller passed. CMake
 4.3 sets this per target; CMake 4.4 adds a per-file-set `JOB_POOL_COMPILE`. Job
 pools are a Ninja feature: the Makefile generator ignores them. The
@@ -402,14 +402,14 @@ alternative is to pass `-j` everywhere, which is easy to forget.
 
 ## 7. Mitigation: remove the per-overlay reconfigure
 
-`profiles/mhp3rd/CMakeLists.txt` already globs `overlays/*/meta.txt` with
+`profiles/mga/CMakeLists.txt` already globs `overlays/*/meta.txt` with
 `CONFIGURE_DEPENDS`. The synthetic test confirmed that a new directory picked up
 by such a glob gets its target without an explicit reconfigure. Building
 `--target <new>` straight away prints `Re-checking globbed directories… Re-running
 CMake…` and then builds it. `add_overlay.py` already writes `meta.txt` before
 building, so its `cmake -S . -B <build>` is redundant. It costs 1.15 s per call
 with 360 overlays, measured in a scratch configure of the real tree: about
-7 min over 355 overlays. The glob check that replaces it costs 0.09 s. A
+7 min over the game's own PRX modules. The glob check that replaces it costs 0.09 s. A
 reconfigure also rewrites `build.ninja` while another Ninja may be running from
 it, which is harmless because CMake writes through a temporary file and renames
 it, but it adds churn.
@@ -444,7 +444,7 @@ headers, so host edits rebuild only 3–8 edges.
 - **Precompiled header:** those headers cost 1.45 s to compile at `-O2` and
   0.12 s through a PCH, so a PCH saves about 1.3 s of the 14.2 s median, or
   about 120 s of compile time per full rebuild (8 %). It does not reduce
-  coupling: editing a precompiled header rebuilds the PCH and all 89 units.
+  coupling: editing a precompiled header rebuilds the PCH and all 77 units.
 - **Narrower header:** splitting what generated code needs (`AllegrexContext`,
   guest memory accessors, the call ABI) from the rest of `runtime.hpp` would
   stop runtime-only edits from rebuilding the corpus. Its value depends on how
@@ -475,7 +475,7 @@ reintroduces item 3 and is slower on every incremental build.
 ## Appendix A: locking wrapper for `CMAKE_MAKE_PROGRAM`
 
 Tested on macOS in the synthetic project. Configure with
-`cmake -B out/mhp3rd -DCMAKE_MAKE_PROGRAM=<path>/ninja-locked …`. For an
+`cmake -B out/mga -DCMAKE_MAKE_PROGRAM=<path>/ninja-locked …`. For an
 existing build directory, change the cached value and reconfigure. The lock
 file is deliberately not `.ninja_lock`, which Ninja uses for its own purposes.
 
@@ -563,7 +563,7 @@ two Ninjas on disjoint targets; SIGKILL, SIGINT or SIGTERM to Ninja after 8 s;
 a killed compiler job; SIGTERM to `cmake --build` and to a Python wrapper; the
 edits in section 3; a locking `CMAKE_MAKE_PROGRAM`; 360 trivial modules under
 Ninja and under Make; a new `CONFIGURE_DEPENDS` directory. The ccache proxy is
-described in section 5. Real-tree numbers come from `out/mhp3rd/.ninja_log`,
+described in section 5. Real-tree numbers come from `out/mga/.ninja_log`,
 `.ninja_deps` (read with Appendix B), and a configure of the tree into a
 temporary directory, which only ran `cmake`, `ninja -t inputs` and `ninja -n`. Upstream sources: Ninja release notes
 1.12.0–1.13.2, issues #2637 and #2703, PR #2764, `src/deps_log.cc` at v1.13.2,

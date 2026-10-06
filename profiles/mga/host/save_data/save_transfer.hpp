@@ -20,14 +20,20 @@
 
 namespace mga::savedata {
 
-// The folders this game keeps on a memory stick: the game data, the
-// downloaded quests, and the install data (a cache the game can rebuild).
-inline constexpr std::string_view kGameName = "ULJM05800";
-inline constexpr std::string_view kSaveFolderNames[] = {"ULJM05800", "ULJM05800QST", "ULJM05800DAT"};
+// The product code of the saves this game keeps on a memory stick. Ac!d
+// numbers them -- ULUS10006000, ULUS10006001, and so on, one per slot -- so
+// they are matched by this code and the digits after it rather than against a
+// fixed list of names, which is what the game this host was derived from had.
+inline constexpr std::string_view kGameName = "ULUS10006";
 
+// Whether a folder on the memory stick is one of this game's saves.
 [[nodiscard]] bool is_game_save_name(std::string_view folder_name);
-// "Game data", "Downloaded quests", "Install data", or the name itself.
+// "Save 1" for ULUS10006001, or the name itself when it is not one of ours.
 [[nodiscard]] std::string save_label(std::string_view folder_name);
+// This game's saves in a PSP/SAVEDATA directory, in order. Read from the
+// directory rather than from a list: the slots a player has used are known
+// only by looking.
+[[nodiscard]] std::vector<std::string> game_saves_in(const std::filesystem::path &savedata_root);
 
 // The key the game passes to the save-data utility, remembered from its first
 // request (the game reads its save at boot), and the memory stick it saves

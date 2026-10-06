@@ -3,36 +3,37 @@
 ## Automated
 
 - **Framework tests** run with `ctest --test-dir out/framework` and need no game data.
-- **Builds on every platform** in CI — planned in [#15](https://github.com/TeamGDB/Yakumo/issues/15).
-- **Regression tests on your own copy of the game**, replaying recorded input and comparing frames against reference images — planned in [#16](https://github.com/TeamGDB/Yakumo/issues/16).
+- **Builds on every platform** in CI — planned in [#15](https://github.com/PRomeotheus/MGAcid/issues/15).
+- **Regression tests on your own copy of the game**, replaying recorded input and comparing frames against reference images — planned in [#16](https://github.com/PRomeotheus/MGAcid/issues/16).
 
 Until those exist, changes are checked by playing, with the smoke test below.
 
 ## Smoke test
 
-About fifteen minutes. It walks through every part of the game that currently works, so a regression anywhere shows up. Start from a fresh profile — rename `profiles/mhp3rd/game/ms0` aside — so earlier state cannot hide a problem.
+About fifteen minutes. It walks through the parts of the game known to work, so a regression in one of them shows up. Start from a fresh profile — rename `profiles/mga/game/ms0` aside — so earlier state cannot hide a problem.
 
 Before you start, write down the commit you are testing: `git rev-parse --short HEAD`. A result is only useful with it.
 
-A released build is tested the same way. Note its version and which download it is (Flatpak or tarball) instead of the commit, start it through its launcher (`flatpak run io.github.teamgdb.Yakumo` or `./yakumo`, from a terminal to see the console), and start from a fresh data directory: for the Flatpak, move `~/.var/app/io.github.teamgdb.Yakumo` aside; for the tarball, `~/.local/share/Yakumo`. The first start then runs the setup from your disc image, which is part of the test. [`LINUX.md`](LINUX.md) says where a release keeps its saves.
+A released build is tested the same way. Note its version and which download it is (Flatpak or tarball) instead of the commit, start it through its launcher (`flatpak run io.github.promeotheus.MGAcid` or `./mgacid`, from a terminal to see the console), and start from a fresh data directory: for the Flatpak, move `~/.var/app/io.github.promeotheus.MGAcid` aside; for the tarball, `~/.local/share/MGAcid`. The first start then runs the setup from your disc image, which is part of the test. [`LINUX.md`](LINUX.md) says where a release keeps its saves.
 
 | # | Step | Expected |
 | --- | --- | --- |
-| 1 | Start `out/mhp3rd/bin/Yakumo` | A window opens; the console lists 355 overlay corpora, the renderer and the audio device |
-| 2 | Wait through the logos | Movies are skipped (see #6) and the title screen appears; streamed music is silent (see #5) |
-| 3 | Start a new game | Character creation appears |
-| 4 | In character creation, change each option | The character model is whole and textured, animates, and changes with each option |
-| 5 | Enter a name, confirm, and save to a slot when asked | The console logs `[savedata] saved … ULJM05800 (encrypted)` and the game moves on to the hot spring scene |
-| 6 | Watch the hot spring scene | Water, steam and the waterfall draw correctly; characters have soft shadows, not white patches |
-| 7 | Talk through the scene and walk out | The village loads; the marker over an NPC's head is red, characters are shaded, and distant geometry fades into the fog |
-| 8 | Walk around the village | Everything draws; it runs slower than elsewhere (see #7) |
-| 9 | Take a quest and depart | The quest map loads with the HUD, the minimap and the character's weapon |
-| 10 | Hunt a small monster | Monsters appear and animate; attacks, hits and sound effects work |
-| 11 | Stand still with no input for ten seconds | The character and the camera stay still |
-| 12 | Move the camera with the right stick, if you have a gamepad | The camera turns and stops when the stick is released |
-| 13 | Return to the village | The village loads again |
-| 14 | Close the window and start the game again | The console logs `[savedata] loaded … (decrypted)`; after the title screen, character select lists the character from step 5 |
-| 15 | Pick that character | The game continues from the save |
+| 1 | Start `out/mga/bin/MGAcid` | A window opens; the console lists the renderer, the audio device, and the modules it loads (`KCEJ_FS`, `KCEJ_SOUND`, `ZLIB`, the stage) |
+| 2 | Wait through the logos | The title screen appears, with its music |
+| 3 | Start a new game | The first stage loads and is drawn, with its text legible |
+| 4 | Play far enough to be offered a save, and save to a slot | The console logs `[savedata] saved … ULUS10006… (encrypted)`, and a matching folder appears under `ms0/PSP/SAVEDATA` |
+| 5 | Open the menu (Esc, or L3+R3) | The game pauses behind it and the settings are there |
+| 6 | Change Texture scaling, and the Interface art row beside it | The picture changes without a restart; the console reports the textures being dropped and rebuilt |
+| 7 | With a music pack in the `music` folder, toggle **Sound → Replacement music** while a track plays | The track changes over without restarting the game |
+| 8 | System → Folders | Each row shows the folder in use, marked `(default)` when it is the automatic one |
+| 9 | System → Saves → **Back up saves…** | Your save is listed as `Save 1 (ULUS10006001)` and copies to the folder you choose |
+| 10 | Move the camera, if you have a gamepad | It turns and stops when the stick is released |
+| 11 | Close the window and start the game again | The console logs `[savedata] loaded … (decrypted)`, and the title screen offers the save from step 4 |
+| 12 | Load it | The game continues from where it was saved |
+
+Steps 3 and 4 are deliberately vague about where the game offers a save: that
+depends on how far the first stage runs, which has not been written down yet.
+Replace them with the real beats once somebody has played through.
 
 ### What to watch for throughout
 
@@ -42,11 +43,11 @@ A released build is tested the same way. Note its version and which download it 
 
 ## Reporting
 
-Open a **Test report** issue with the platform, hardware, commit and the steps you reached. If a result changes a cell in [the compatibility table](COMPATIBILITY.md), update the table in a pull request as well.
+Open a **Test report** issue with the platform, hardware, commit and the steps you reached.
 
-Useful settings while testing — all described in [the profile README](../profiles/mhp3rd/README.md#configuration):
+Useful settings while testing — all described in [the profile README](../profiles/mga/README.md#configuration):
 
-- `MHP3RD_SCREENSHOT_DIR` and `MHP3RD_SCREENSHOT_EVERY` capture frames to attach to a report.
-- `MHP3RD_TRACE_PAD=1` shows whether input is reaching the game.
-- `MHP3RD_TRACE_AUDIO=1` shows audio levels and dropped frames.
+- `MGA_SCREENSHOT_DIR` and `MGA_SCREENSHOT_EVERY` capture frames to attach to a report.
+- `MGA_TRACE_PAD=1` shows whether input is reaching the game.
+- `MGA_TRACE_AUDIO=1` shows audio levels and dropped frames.
 - `PSPRECOMP_HLE_HISTOGRAM=1` prints which system calls the game made.

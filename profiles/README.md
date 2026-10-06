@@ -8,4 +8,4 @@ A profile is selected at configure time:
 cmake -S . -B out/<profile> -DPSPRECOMP_PROFILE=<profile>
 ```
 
-The current repository includes the `mhp3rd` profile. See `docs/PROFILE_GUIDE.md` before adding another title.
+The current repository includes the `mga` profile. See `docs/PROFILE_GUIDE.md` before adding another title.

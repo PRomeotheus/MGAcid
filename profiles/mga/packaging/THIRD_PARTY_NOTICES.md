@@ -1,14 +1,14 @@
 # Third-party notices
 
-Yakumo is distributed under the MIT License (`Yakumo-LICENSE.txt`). Its released builds also contain the third-party software listed here, each under its own license. The license texts are in the same directory as this file: `licenses/` in the tarball, and `/app/share/licenses/io.github.teamgdb.Yakumo/` (also `/app/lib/yakumo/licenses/`) in the Flatpak.
+MGAcid is distributed under the MIT License (`MGAcid-LICENSE.txt`). Its released builds also contain the third-party software listed here, each under its own license. The license texts are in the same directory as this file: `licenses/` in the tarball, and `/app/share/licenses/io.github.promeotheus.MGAcid/` (also `/app/lib/mgacid/licenses/`) in the Flatpak.
 
-Yakumo does not include any game assets or original game files: no disc image, no copy of the game's executable or data, and no textures, models, audio or video from the game. You must provide the files from your own legally obtained copy of the game.
+MGAcid does not include any game assets or original game files: no disc image, no copy of the game's executable or data, and no textures, models, audio or video from the game. You must provide the files from your own legally obtained copy of the game.
 
 ## Compiled into the program
 
 ### Dear ImGui 1.92.9b
 
-Yakumo's menu and setup screens. Copyright (c) 2014-2026 Omar Cornut. MIT License: `DearImGui-LICENSE.txt`. <https://github.com/ocornut/imgui>
+MGAcid's menu and setup screens. Copyright (c) 2014-2026 Omar Cornut. MIT License: `DearImGui-LICENSE.txt`. <https://github.com/ocornut/imgui>
 
 ### tiny-AES-c
 
@@ -24,7 +24,7 @@ Rasterizes the game's text. Copyright (c) 2017 Sean Barrett. Used under the publ
 
 ## Shipped as separate libraries
 
-These are dynamically linked shared libraries in `lib/` next to the executable (`/app/lib/yakumo/lib/` in the Flatpak). They are unmodified builds of the upstream releases below. You may replace them with your own builds of the same or a compatible version.
+These are dynamically linked shared libraries in `lib/` next to the executable (`/app/lib/mgacid/lib/` in the Flatpak). They are unmodified builds of the upstream releases below. You may replace them with your own builds of the same or a compatible version.
 
 ### SDL3 3.4.16
 
@@ -45,9 +45,9 @@ Decodes the game's ATRAC3 and ATRAC3plus audio and its H.264 movies. FFmpeg is l
   ./configure --prefix=<prefix> --enable-shared --disable-static --disable-programs --disable-doc --disable-avdevice --disable-avformat --disable-avfilter --disable-swscale --disable-swresample --disable-network --disable-autodetect --disable-everything --enable-decoder=atrac3,atrac3p,h264 --disable-x86asm --disable-debug
   ```
 
-- Built by the Yakumo build itself, `profiles/mga/cmake/FFmpeg.cmake` in <https://github.com/TeamGDB/Yakumo>, which pins the version, checksum and configuration above.
+- Built by the MGAcid build itself, `profiles/mga/cmake/FFmpeg.cmake` in <https://github.com/PRomeotheus/MGAcid>, which pins the version, checksum and configuration above.
 
-**Source offer.** The exact FFmpeg source archive above is published on the same release page as every Yakumo build that contains it. For at least three years after we distribute a build, we will also provide that source to anyone who asks through the project's issue tracker, <https://github.com/TeamGDB/Yakumo/issues>, at no more than the cost of providing it.
+**Source offer.** The exact FFmpeg source archive above is published on the same release page as every MGAcid build that contains it. For at least three years after we distribute a build, we will also provide that source to anyone who asks through the project's issue tracker, <https://github.com/PRomeotheus/MGAcid/issues>, at no more than the cost of providing it.
 
 ## Font
 

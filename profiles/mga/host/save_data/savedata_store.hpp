@@ -14,7 +14,7 @@
 namespace mga::savedata {
 
 struct SaveFiles {
-    std::string game_name;   // e.g. "ULJM05800"
+    std::string game_name;   // e.g. "ULUS10006"
     std::string save_name;   // appended to the game name; may be empty
     std::string file_name;   // the data file, e.g. "MGA.BIN"
     std::optional<Block> key;  // game key; saves are encrypted with it, and plain without one

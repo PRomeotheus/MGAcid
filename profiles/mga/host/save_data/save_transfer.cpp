@@ -4,6 +4,7 @@
 #include "save_data/savedata_crypto.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <ctime>
 #include <fstream>
 #include <iterator>
@@ -24,7 +25,6 @@ constexpr std::size_t kFileListEntrySize = 32u;
 constexpr std::size_t kFileListNameSize = 13u;
 // The folders an export carries: the install data is a cache the game
 // rebuilds, and it is several times the size of the rest.
-constexpr std::string_view kExportedFolders[] = {"ULJM05800", "ULJM05800QST"};
 
 struct Session {
     std::mutex mutex;
@@ -124,15 +124,37 @@ bool same_folder(const fs::path &a, const fs::path &b) {
 } // namespace
 
 bool is_game_save_name(std::string_view folder_name) {
-    return std::find(std::begin(kSaveFolderNames), std::end(kSaveFolderNames), folder_name) !=
-           std::end(kSaveFolderNames);
+    if (folder_name.size() <= kGameName.size()) return false;
+    if (folder_name.substr(0u, kGameName.size()) != kGameName) return false;
+    // Only digits after the product code. Without this a folder that merely
+    // starts with it -- a backup someone renamed, say -- would be taken for a
+    // save and copied over a real one.
+    return std::all_of(folder_name.begin() + static_cast<std::ptrdiff_t>(kGameName.size()),
+                       folder_name.end(),
+                       [](unsigned char c) { return std::isdigit(c) != 0; });
 }
 
 std::string save_label(std::string_view folder_name) {
-    if (folder_name == "ULJM05800") return "Game data";
-    if (folder_name == "ULJM05800QST") return "Downloaded quests";
-    if (folder_name == "ULJM05800DAT") return "Install data";
-    return std::string(folder_name);
+    if (!is_game_save_name(folder_name)) return std::string(folder_name);
+    const std::string_view digits = folder_name.substr(kGameName.size());
+    const std::size_t first = digits.find_first_not_of('0');
+    // The game's own slot number without its leading zeros. The exact folder
+    // name is shown beside this wherever it matters, so nothing is lost.
+    return "Save " + std::string(first == std::string_view::npos ? std::string_view("0")
+                                                                : digits.substr(first));
+}
+
+std::vector<std::string> game_saves_in(const fs::path &savedata_root) {
+    std::vector<std::string> names;
+    std::error_code ec;
+    for (fs::directory_iterator it(savedata_root, ec); !ec && it != fs::directory_iterator();
+         it.increment(ec)) {
+        if (!it->is_directory(ec)) continue;
+        const std::string name = it->path().filename().string();
+        if (is_game_save_name(name) && has_param_sfo(it->path())) names.push_back(name);
+    }
+    std::sort(names.begin(), names.end());
+    return names;
 }
 
 void remember_game_key(const std::string &game_name, const Block &key) {
@@ -237,10 +259,11 @@ SaveCheck check_save_folder(const fs::path &folder, const std::optional<Block> &
             listed.emplace_back(std::move(name), hash);
         }
     }
-    // The game data and the quests are written through the save-data utility,
-    // which lists their file; the install data is written file by file and
-    // lists none.
-    if (listed.empty() && check.name != "ULJM05800DAT") {
+    // Every save this game writes goes through the save-data utility, which
+    // lists its file. The game this host was derived from also had an install
+    // folder written outside the utility, which listed none and was excepted
+    // here; Ac!d has no such folder, so a save that lists nothing is wrong.
+    if (listed.empty()) {
         check.problem = "PARAM.SFO lists no data file.";
         return check;
     }
@@ -367,9 +390,7 @@ ExportResult export_saves(const fs::path &memory_stick, const fs::path &target,
                           std::chrono::system_clock::time_point time) {
     ExportResult result;
     const fs::path root = memory_stick / "PSP" / "SAVEDATA";
-    std::vector<std::string> names;
-    for (const std::string_view name : kExportedFolders)
-        if (has_param_sfo(root / std::string(name))) names.emplace_back(name);
+    std::vector<std::string> names = game_saves_in(root);
     if (names.empty()) {
         result.error = "There is no save to export yet.";
         return result;
@@ -379,7 +400,7 @@ ExportResult export_saves(const fs::path &memory_stick, const fs::path &target,
         result.error = "The folder " + text(target) + " does not exist.";
         return result;
     }
-    result.folder = unused_path(target, "MHP3rd saves " + timestamp_for_path(time));
+    result.folder = unused_path(target, "MGAcid saves " + timestamp_for_path(time));
     const fs::path savedata = result.folder / "PSP" / "SAVEDATA";
     for (const std::string &name : names) {
         std::string error;
@@ -394,11 +415,7 @@ ExportResult export_saves(const fs::path &memory_stick, const fs::path &target,
 }
 
 std::vector<std::string> saves_to_back_up(const fs::path &memory_stick) {
-    std::vector<std::string> names;
-    const fs::path root = memory_stick / "PSP" / "SAVEDATA";
-    for (const std::string_view name : kSaveFolderNames)
-        if (has_param_sfo(root / std::string(name))) names.emplace_back(name);
-    return names;
+    return game_saves_in(memory_stick / "PSP" / "SAVEDATA");
 }
 
 fs::path backup_folder(const fs::path &target, std::optional<std::chrono::system_clock::time_point> time) {

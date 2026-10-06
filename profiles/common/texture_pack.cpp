@@ -248,11 +248,11 @@ std::string TexturePack::key_name(std::uint64_t key) {
     return name;
 }
 
-void TexturePack::open(const std::filesystem::path &root) {
+void TexturePack::open_folder(const std::filesystem::path &folder) {
     cache_.clear();
     dumped_.clear();
     loaded_ = 0u;
-    replacements_ = root / "textures";
+    replacements_ = folder;
     dumps_ = replacements_ / "dump";
     std::error_code code;
     available_ = false;

@@ -207,6 +207,10 @@ bool Layer::handle_event(const SDL_Event &event) {
             screenshot_ = true;
             return true;
         }
+        if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat && event.key.key == SDLK_F7) {
+            ram_dump_ = true;
+            return true;
+        }
         if (event.type == SDL_EVENT_KEY_DOWN) device_ = InputDevice::Keyboard;
         break;
     case SDL_EVENT_MOUSE_BUTTON_DOWN:
@@ -267,6 +271,7 @@ bool Layer::fast_forward() const {
 }
 
 bool Layer::take_screenshot_request() { return std::exchange(screenshot_, false); }
+bool Layer::take_ram_dump() { return std::exchange(ram_dump_, false); }
 
 bool Layer::take_state_hotkey(unsigned &slot, bool &load) {
     if (!state_hotkey_) return false;

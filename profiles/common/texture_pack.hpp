@@ -44,10 +44,13 @@ struct PackedTexture {
 
 class TexturePack {
 public:
-    // Points the pack at a data directory. Replacements are looked for under
-    // `<root>/textures`, dumps written to `<root>/textures/dump`. Loading is
-    // lazy: this only notes where to look and whether the folder exists.
-    void open(const std::filesystem::path &root);
+    // Points the pack at the folder the replacements are in; dumps are
+    // written to `<folder>/dump`. Loading is lazy: this only notes where to
+    // look and whether the folder exists. Named open_folder rather than open
+    // because it used to be handed the data directory and derive the rest, and
+    // a call still passing that should fail to compile rather than quietly
+    // look one level up.
+    void open_folder(const std::filesystem::path &folder);
 
     // True when a textures folder exists with at least one file in it.
     [[nodiscard]] bool available() const noexcept { return available_; }

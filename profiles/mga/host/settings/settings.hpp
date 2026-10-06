@@ -51,6 +51,11 @@ struct Settings {
     std::uint32_t texture_scale{1u};   // 1 is off; 2/3/4 upscale decoded textures before they are uploaded
     bool texture_scale_sharp{true};    // edge-preserving rather than plain bicubic, for art drawn texel by texel
     bool texture_pack{true};           // use replacement textures from <data>/textures when there are any
+    // Enlarge lettering and interface art with the engine rather than taking a
+    // replacement for it. On, because a resampled replacement softens letters
+    // the engine keeps crisp. Off hands those textures back to the pack, which
+    // is what someone who has edited one by hand wants.
+    bool engine_interface_art{true};
     bool smart_2d{true};               // sample pixel-mapped 2D sharp, whatever the 3D filter is
     bool post_process{};               // show the frame through a shader pass rather than a plain blit
     bool fxaa{};                       // anti-alias the finished frame; needs post_process
@@ -61,6 +66,15 @@ struct Settings {
     // the built-in contrast and saturation lift. colour_grade is the strength
     // either way, so a table with colour_grade at 0 does nothing.
     std::string colour_lut;
+
+    // Where saves, the texture pack and the replacement music are kept. Empty
+    // means the default: beside the executable, or wherever an installation
+    // made before that layout already has them. Unlike colour_lut these are
+    // whole paths -- the point of them is to put a folder on another drive --
+    // and the player picks them with the browser rather than typing them.
+    std::string saves_folder;
+    std::string textures_folder;
+    std::string music_folder;
     float bloom{};                     // 0 off .. 1 strongest; glow around bright things; needs post_process
     float sharpen{};                   // 0 off .. 1 strongest; contrast-adaptive sharpen; needs post_process
     float reflections{};               // 0 off .. 1 strongest; screen-space reflections, floors only
@@ -81,6 +95,9 @@ struct Settings {
     std::uint32_t effects_volume{100};  // 0 .. 100; the SAS voices: footsteps, gunfire, the interface
     std::uint32_t music_volume{100};    // 0 .. 100; the ATRAC streams: music and recorded speech
     bool mute{};
+    // Play the replacement recordings in <data>/music when there are any.
+    // Kept separate from the volume so the two can be compared by ear.
+    bool music_pack{true};
 
     // Controls
     bool state_hotkeys{true};          // F1-F4 save a state, with shift load it
@@ -126,6 +143,11 @@ inline constexpr std::uint32_t kMaxTextureScale = 4u;
 // Writes current() to settings.ini, leaving values set by environment
 // variables at what the file had. Failures are reported on the console.
 void save();
+
+// Pushes the three folder choices into install::data_folder, which cannot ask
+// for them itself: settings already depends on install, not the other way
+// round. Called as settings load, and by the menu when a folder row changes.
+void apply_folder_choices();
 
 // The environment variable that decides the setting stored under `key`
 // (for example "video.internal_scale") for this run, or null.

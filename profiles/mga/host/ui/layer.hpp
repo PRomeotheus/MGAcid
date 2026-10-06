@@ -64,6 +64,8 @@ public:
     [[nodiscard]] bool fast_forward() const;
     // A screenshot asked for, reported once.
     bool take_screenshot_request();
+    // F7: write the guest's memory out, for finding where a setting lives.
+    bool take_ram_dump();
     bool take_back();         // Esc while a screen runs
     std::optional<std::filesystem::path> take_dropped_file();
     [[nodiscard]] bool window_closed() const noexcept { return window_closed_; }
@@ -111,6 +113,7 @@ private:
     // window event is nowhere near one.
     std::optional<std::pair<unsigned, bool>> state_hotkey_{};
     bool screenshot_{};
+    bool ram_dump_{};
     bool back_{};
     std::optional<std::filesystem::path> dropped_;
 };

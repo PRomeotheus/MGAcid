@@ -61,6 +61,7 @@ if(MGA_RENDERER)
         # interface over the game.
         set(MGA_RENDERER_SOURCES
             host/gpu/frame_record.cpp
+            host/gpu/shadow_map.cpp
             host/gpu/vulkan_renderer.cpp
             host/ui/file_browser.cpp
             host/ui/font_menu.cpp
@@ -88,7 +89,7 @@ endif()
 # The build the in-game menu shows: `git describe` of the checkout, refreshed
 # on every build but rewritten only when it changes, so only the menu
 # recompiles after a commit.
-set(MGA_VERSION_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_version/yakumo_version.hpp")
+set(MGA_VERSION_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_version/psprecomp_version.hpp")
 add_custom_target(mga_version
     COMMAND ${CMAKE_COMMAND} -DSOURCE_DIR=${PROJECT_SOURCE_DIR} -DOUTPUT=${MGA_VERSION_HEADER}
             -P "${MGA_PROFILE_DIR}/tools/write_version.cmake"
@@ -107,11 +108,11 @@ set(MGA_HOST_SOURCES
     host/movie/avc_decoder.cpp
     host/movie/psmf_demuxer.cpp
     host/audio/audio_sink.cpp
+    host/audio/music_pack.cpp
     host/audio/sas_core.cpp
     host/gpu/ge_state.cpp
     host/gpu/ge_state_serialise.cpp
     host/gpu/texture_decode.cpp
-    host/gpu/shadow_map.cpp
     host/gpu/colour_lut.cpp
     "${PSP_COMMON_DIR}/texture_pack.cpp"
     "${PSP_COMMON_DIR}/texture_scale.cpp"
@@ -240,8 +241,13 @@ add_executable(MGAcid
 )
 if(WIN32)
     set(MGA_WINDOWS_ICON "${MGA_PROFILE_DIR}/packaging/windows/emblem.ico")
-    configure_file(packaging/windows/Yakumo.rc.in Yakumo.rc @ONLY)
-    target_sources(MGAcid PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/Yakumo.rc")
+    configure_file(packaging/windows/MGAcid.rc.in MGAcid.rc @ONLY)
+    target_sources(MGAcid PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/MGAcid.rc")
+    # The .rc names the icon by path, so nothing in the build graph knows the
+    # resource is built from it: replacing emblem.ico on its own rebuilt the
+    # executable while leaving the old icon compiled into it. Say so.
+    set_source_files_properties("${CMAKE_CURRENT_BINARY_DIR}/MGAcid.rc"
+        PROPERTIES OBJECT_DEPENDS "${MGA_WINDOWS_ICON}")
 endif()
 if(MGA_RENDERER)
     add_dependencies(MGAcid mga_shaders mga_version)
@@ -412,6 +418,20 @@ if(MGA_HAS_FFMPEG)
     if(PSPRECOMP_BUILD_TESTS)
         add_test(NAME mga_texture_pack_tests COMMAND mga_texture_pack_tests)
     endif()
+endif()
+
+# Tests for the pieces that can be reasoned about without a window: the scaler,
+# the Configuration screen's behaviour, and the watch that notices one of the
+# game's own menus. The screen's drawing is not here because it needs a GPU.
+add_executable(mga_texture_scale_tests
+    tests/texture_scale_tests.cpp
+    "${PSP_COMMON_DIR}/texture_scale.cpp")
+target_include_directories(mga_texture_scale_tests PRIVATE
+    "${MGA_PROFILE_DIR}/host"
+    "${CMAKE_CURRENT_SOURCE_DIR}/..")
+set_target_properties(mga_texture_scale_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+if(PSPRECOMP_BUILD_TESTS)
+    add_test(NAME mga_texture_scale_tests COMMAND mga_texture_scale_tests)
 endif()
 
 # Chained AOT calls nest native frames; give the guest-executing main thread

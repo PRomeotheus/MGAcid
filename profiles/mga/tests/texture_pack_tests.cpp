@@ -119,7 +119,7 @@ int main() {
     { std::ofstream marker(root / "textures" / "readme.txt"); marker << "pack\n"; }
 
     TexturePack writer;
-    writer.open(root);
+    writer.open_folder(root / "textures");
     check(writer.available(), "a folder with a file in it counts as a pack");
     writer.set_dumping(true);
     check(writer.dumping(), "dumping can be turned on");
@@ -135,7 +135,7 @@ int main() {
     // a replacement with nothing renamed and nothing converted.
     fs::copy_file(dumped, root / "textures" / name, fs::copy_options::overwrite_existing, code);
     TexturePack reader;
-    reader.open(root);
+    reader.open_folder(root / "textures");
     const PackedTexture *back = reader.find(kKey);
     check(back != nullptr, "a dump is found again as a replacement");
     if (back != nullptr) {
@@ -174,7 +174,7 @@ int main() {
             continue;
         }
         TexturePack pack;
-        pack.open(root);
+        pack.open_folder(root / "textures");
         const PackedTexture *read = pack.find(layout.key);
         check(read != nullptr && read->width == 4u && read->height == 4u && read->pixels.size() == 16u,
               std::string("a PNG saved as ") + layout.what + " is read");
@@ -187,7 +187,7 @@ int main() {
         junk << "this is not a PNG";
     }
     TexturePack tolerant;
-    tolerant.open(root);
+    tolerant.open_folder(root / "textures");
     check(tolerant.find(kJunk) == nullptr, "a file that is not a PNG is refused rather than crashing");
 
     fs::remove_all(root, code);

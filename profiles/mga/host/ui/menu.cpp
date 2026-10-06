@@ -24,7 +24,7 @@
 #include "save_data/save_transfer.hpp"
 #include "state/save_state.hpp"
 #include "settings/settings.hpp"
-#include "yakumo_version.hpp"
+#include "psprecomp_version.hpp"
 
 #include "imgui.h"
 #include "imgui_internal.h"
@@ -337,6 +337,26 @@ void Menu::video() {
         if (toggle_row("Texture pack", s.texture_pack && present, o)) {
             s.texture_pack = !s.texture_pack;
             renderer().set_texture_pack(s.texture_pack);
+            settings::save();
+        }
+    }
+    {
+        // Ac!d recolours its interface art as it runs, so what gets drawn
+        // often matches nothing in the pack. Letting the engine enlarge those
+        // keeps letters and hard edges crisp; handing them to the pack is what
+        // someone who has edited one by hand wants.
+        RowOptions o = options_for("video.engine_interface_art",
+                                   "Who enlarges the interface art the game recolours as it runs. The engine keeps "
+                                   "small text and hard edges crisp. The texture pack uses your own replacement "
+                                   "instead, which is what you want once you have edited one by hand.");
+        const bool pack = renderer().texture_pack_available() && s.texture_pack;
+        o.disabled = s.texture_scale <= 1u || !s.texture_scale_sharp || !pack;
+        if (s.texture_scale <= 1u) o.note = "scaling off";
+        else if (!s.texture_scale_sharp) o.note = "needs edge-preserving";
+        else if (!pack) o.note = "no pack in use";
+        if (choice_row("Interface art", s.engine_interface_art ? "Engine" : "Texture pack", o)) {
+            s.engine_interface_art = !s.engine_interface_art;
+            renderer().set_engine_interface_art(s.engine_interface_art);
             settings::save();
         }
     }
@@ -732,6 +752,13 @@ void Menu::audio() {
                    locked("audio.music_volume", "Loudness of the background music."))) {
         s.music_volume = static_cast<std::uint32_t>(music);
         audio::set_music_gain(static_cast<float>(s.music_volume) / 100.0f);
+        settings::save();
+    }
+    if (toggle_row("Replacement music", s.music_pack,
+                   locked("audio.music_pack",
+                          "Play the recordings in the music folder instead of the game's own. "
+                          "Switching it takes effect straight away, so a track can be heard both ways."))) {
+        s.music_pack = !s.music_pack;
         settings::save();
     }
     if (toggle_row("Mute", s.mute, locked("audio.mute", "Silence the game without losing the volume setting."))) {
@@ -1364,7 +1391,7 @@ void Menu::system() {
     }
 
     section("About");
-    info_row("PSPRecomp", std::string(kYakumoVersion));
+    info_row("PSPRecomp", std::string(kPSPRecompVersion));
     info_row("Game", std::string(install::kGameTitle) + " (" + install::kDiscIdDisplay + ")");
     info_row("Data folder", data_dir);
     if (!savedata::memory_stick().empty())
@@ -1586,6 +1613,8 @@ bool fast_forward_held() {
     // typed into: a tab there belongs to the field.
     return layer.attached() && !text_input_open() && !menu_over_game() && layer.fast_forward();
 }
+
+bool ram_dump_requested() { return Layer::get().take_ram_dump(); }
 
 bool screenshot_requested() {
     Layer &layer = Layer::get();

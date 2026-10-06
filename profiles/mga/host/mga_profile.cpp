@@ -1,6 +1,8 @@
 #include "mga_profile.hpp"
 
+#include "audio/music_pack.hpp"
 #include "hle/hle_common.hpp"
+#include "install/user_data.hpp"
 #include "kernel/kernel.hpp"
 #include "kernel/module_loader.hpp"
 #include "overlays.hpp"
@@ -82,6 +84,13 @@ void install_profile(Runtime &runtime, const psprecomp::Elf32Image &elf, const P
     register_system(hle);
     register_media(hle);
     register_atrac(hle);
+    // Replacement music, looked up per cue as the game starts one. Opening the
+    // folder here only lists it; nothing is read until a cue asks.
+    try {
+        audio::music_pack().open_folder(install::data_folder(install::DataFolder::Music));
+    } catch (const std::exception &e) {
+        std::cout << "[music] cannot look for replacement music: " << e.what() << "\n";
+    }
     register_mpeg(hle);
     register_font(hle);
     register_utility(hle, paths.memory_stick);

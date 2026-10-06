@@ -12,6 +12,7 @@
 #include "install/game_identity.hpp"
 #include "install/installer.hpp"
 #include "install/user_data.hpp"
+#include "settings/settings.hpp"
 #include "kernel/kernel.hpp"
 #include "kernel/module_loader.hpp"
 
@@ -173,11 +174,13 @@ std::filesystem::path checkout_game_directory() {
 // ms0 of an installation lives in the per-user data directory with the rest
 // of it. Saves a developer build made in the checkout before that stay in use
 // until ms0 exists in the data directory.
-std::filesystem::path installed_memory_stick(const std::filesystem::path &data_dir,
-                                             const std::filesystem::path &checkout_game_dir) {
-    const std::filesystem::path memory_stick = mga::memory_stick_directory(data_dir);
+std::filesystem::path installed_memory_stick(const std::filesystem::path &checkout_game_dir) {
+    const std::filesystem::path memory_stick = mga::install::data_folder(mga::install::DataFolder::Saves);
     std::error_code ec;
-    if (!checkout_game_dir.empty() && !std::filesystem::exists(memory_stick, ec)) {
+    // Tested on PSP/SAVEDATA rather than on ms0 itself: the folder is created
+    // the moment it is asked for, so its mere existence says nothing about
+    // whether there are saves in it.
+    if (!checkout_game_dir.empty() && !std::filesystem::is_directory(memory_stick / "PSP" / "SAVEDATA", ec)) {
         const std::filesystem::path legacy = mga::memory_stick_directory(checkout_game_dir);
         if (std::filesystem::is_directory(legacy / "PSP" / "SAVEDATA", ec)) {
             std::cerr << "note: using the saves in " << legacy.string() << "; move that directory to "
@@ -208,7 +211,7 @@ std::optional<GameFiles> locate_game(const Options &options) {
                     GameFiles files;
                     files.executable = installed->executable;
                     files.disc_image = installed->disc_image;
-                    files.memory_stick = installed_memory_stick(data_dir, checkout_game_dir);
+                    files.memory_stick = installed_memory_stick(checkout_game_dir);
                     return files;
                 }
                 const std::string where = install::path_to_utf8(installed->disc_image);
@@ -345,6 +348,12 @@ int main(int argc, char **argv) {
             return 2;
         }
         if (options.install_image) return install_from_command_line(options);
+
+        // Reading the settings first so a folder the player has pointed
+        // elsewhere is the one created, rather than one appearing beside the
+        // executable that nothing will ever use.
+        (void)mga::settings::current();  // read now; the folders below depend on them
+        mga::install::create_data_folders();
 
         const std::optional<GameFiles> files = locate_game(options);
         if (!files) return 1;

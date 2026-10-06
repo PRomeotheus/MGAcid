@@ -220,6 +220,10 @@ const std::vector<Field> &fields() {
          [](Settings &s, const std::string &t) { return parse_bool(t, s.texture_pack); },
          [](const Settings &s) { return std::string(s.texture_pack ? "1" : "0"); },
          [](Settings &s, const char *t) { s.texture_pack = variable_flag(t); }},
+        {"video.engine_interface_art", "MGA_ENGINE_INTERFACE_ART",
+         [](Settings &s, const std::string &t) { return parse_bool(t, s.engine_interface_art); },
+         [](const Settings &s) { return std::string(s.engine_interface_art ? "1" : "0"); },
+         [](Settings &s, const char *t) { s.engine_interface_art = variable_flag(t); }},
         {"video.colour_grade", "MGA_COLOUR_GRADE",
          [](Settings &s, const std::string &t) { return parse_float(t, 0.0f, 1.0f, s.colour_grade); },
          [](const Settings &s) { return format_float(s.colour_grade); },
@@ -246,6 +250,18 @@ const std::vector<Field> &fields() {
              const std::string text{t};
              if (text.find('/') == std::string::npos && text.find('\\') == std::string::npos) s.colour_lut = text;
          }},
+        {"paths.saves", "MGA_SAVES_DIR",
+         [](Settings &s, const std::string &t) { s.saves_folder = t; return true; },
+         [](const Settings &s) { return s.saves_folder; },
+         [](Settings &s, const char *t) { s.saves_folder = t; }},
+        {"paths.textures", "MGA_TEXTURES_DIR",
+         [](Settings &s, const std::string &t) { s.textures_folder = t; return true; },
+         [](const Settings &s) { return s.textures_folder; },
+         [](Settings &s, const char *t) { s.textures_folder = t; }},
+        {"paths.music", "MGA_MUSIC_DIR",
+         [](Settings &s, const std::string &t) { s.music_folder = t; return true; },
+         [](const Settings &s) { return s.music_folder; },
+         [](Settings &s, const char *t) { s.music_folder = t; }},
         {"video.smart_2d", "MGA_SMART_2D",
          [](Settings &s, const std::string &t) { return parse_bool(t, s.smart_2d); },
          [](const Settings &s) { return std::string(s.smart_2d ? "1" : "0"); },
@@ -281,6 +297,7 @@ const std::vector<Field> &fields() {
          [](Settings &s, const std::string &t) { return parse_uint(t, 0u, 100u, s.music_volume); },
          [](const Settings &s) { return std::to_string(s.music_volume); }, nullptr},
         BOOL_FIELD("audio.mute", mute),
+        BOOL_FIELD("audio.music_pack", music_pack),
         {"input.confirm", "MGA_PAD_FACE",
          [](Settings &s, const std::string &t) {
              if (t == "south") s.confirm_south = true;
@@ -406,6 +423,12 @@ State &state() {
     return value;
 }
 
+void push_folder_choices(const Settings &values) {
+    install::set_chosen_folder(install::DataFolder::Saves, install::path_from_utf8(values.saves_folder));
+    install::set_chosen_folder(install::DataFolder::Textures, install::path_from_utf8(values.textures_folder));
+    install::set_chosen_folder(install::DataFolder::Music, install::path_from_utf8(values.music_folder));
+}
+
 void load(State &s) {
     s.loaded = true;
     try {
@@ -430,9 +453,12 @@ void load(State &s) {
         s.values.name_entry = NameEntry::Fixed;
         s.overrides["input.name_entry"] = "MGA_OSK_TEXT";
     }
+    push_folder_choices(s.values);
 }
 
 } // namespace
+
+void apply_folder_choices() { push_folder_choices(current()); }
 
 Settings &current() {
     State &s = state();

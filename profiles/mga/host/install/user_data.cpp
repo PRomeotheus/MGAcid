@@ -1,6 +1,11 @@
 #include "install/user_data.hpp"
 
+#include "app_paths.hpp"
+
 #include "psprecomp/common.hpp"
+
+#include <array>
+#include <iostream>
 
 #include <cstdlib>
 #include <fstream>
@@ -40,6 +45,78 @@ std::string path_to_utf8(const std::filesystem::path &path) {
 
 std::filesystem::path path_from_utf8(const std::string &text) {
     return std::filesystem::path(std::u8string(text.begin(), text.end()));
+}
+
+namespace {
+
+// The player's choices, empty until settings reports one.
+std::array<std::filesystem::path, 3> &chosen_folders() {
+    static std::array<std::filesystem::path, 3> folders;
+    return folders;
+}
+
+std::size_t folder_index(DataFolder which) noexcept { return static_cast<std::size_t>(which); }
+
+// Whether a directory can be created and written at `folder`. An installation
+// under Program Files cannot, and finding that out by failing to save a game
+// is no use to anyone.
+bool usable(const std::filesystem::path &folder) {
+    std::error_code ec;
+    std::filesystem::create_directories(folder, ec);
+    if (ec) return false;
+    const std::filesystem::path probe = folder / ".write-test";
+    std::ofstream out(probe);
+    if (!out) return false;
+    out.close();
+    std::filesystem::remove(probe, ec);
+    return true;
+}
+
+} // namespace
+
+const char *data_folder_name(DataFolder which) noexcept {
+    switch (which) {
+    case DataFolder::Saves: return "ms0";
+    case DataFolder::Textures: return "textures";
+    case DataFolder::Music: return "music";
+    }
+    return "";
+}
+
+void set_chosen_folder(DataFolder which, const std::filesystem::path &folder) {
+    chosen_folders()[folder_index(which)] = folder;
+}
+
+std::filesystem::path data_folder(DataFolder which) {
+    if (const std::filesystem::path &chosen = chosen_folders()[folder_index(which)]; !chosen.empty())
+        return chosen;
+
+    const char *name = data_folder_name(which);
+    const std::filesystem::path beside = executable_directory();
+    const std::filesystem::path preferred = beside.empty() ? std::filesystem::path{} : beside / name;
+    std::error_code ec;
+    if (!preferred.empty() && std::filesystem::is_directory(preferred, ec)) return preferred;
+
+    // An installation made before these folders moved beside the executable.
+    // Said once per folder rather than every time one is asked for.
+    const std::filesystem::path legacy = user_data_directory() / name;
+    if (std::filesystem::is_directory(legacy, ec)) {
+        static std::array<bool, 3> told{};
+        if (!told[folder_index(which)]) {
+            told[folder_index(which)] = true;
+            std::cout << "[paths] " << name << ": using " << path_to_utf8(legacy)
+                      << "; move it beside the executable, or pick it in the menu, to keep it with the game\n";
+        }
+        return legacy;
+    }
+    if (!preferred.empty() && usable(preferred)) return preferred;
+    return legacy;
+}
+
+void create_data_folders() {
+    std::error_code ec;
+    for (const DataFolder which : {DataFolder::Saves, DataFolder::Textures, DataFolder::Music})
+        std::filesystem::create_directories(data_folder(which), ec);
 }
 
 std::filesystem::path user_data_directory() {

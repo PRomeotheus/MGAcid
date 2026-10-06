@@ -48,6 +48,8 @@ void draw_over_game();
 [[nodiscard]] bool fast_forward_held();
 // Whether a screenshot was asked for, reported once.
 [[nodiscard]] bool screenshot_requested();
+// Whether F7 asked for the guest's memory to be written out, reported once.
+[[nodiscard]] bool ram_dump_requested();
 
 // Whether the menu, opened now, pauses the game. Settings decide: "Pause the
 // game when the menu opens", and during ad hoc play "Pause during

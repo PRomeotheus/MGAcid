@@ -44,6 +44,7 @@ namespace mga::gpu {
 // folder, the other enlarges a decoded one -- so they keep a neutral namespace
 // and are named here rather than copied per profile.
 using psp::gpu::PackedTexture;
+using psp::gpu::looks_like_pixel_art;
 using psp::gpu::scale_texture;
 using psp::gpu::TexturePack;
 using psp::gpu::TextureScaleMode;
@@ -796,6 +797,7 @@ struct VulkanRenderer::Impl {
     // them; see common/texture_pack.hpp.
     TexturePack texture_pack;
     bool texture_pack_enabled{};
+    bool engine_interface_art{true};
     // Decoded textures are upscaled by this factor before upload, so they
     // still have detail to give at high internal resolution.
     std::uint32_t texture_scale{1u};
@@ -1659,8 +1661,9 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
     impl.post_bloom = std::clamp(player.bloom, 0.0f, 1.0f);
     impl.shadow_strength = std::clamp(player.shadow_maps, 0.0f, 1.0f);
     impl.texture_pack_enabled = player.texture_pack;
+    impl.engine_interface_art = player.engine_interface_art;
     try {
-        impl.texture_pack.open(install::user_data_directory());
+        impl.texture_pack.open_folder(install::data_folder(install::DataFolder::Textures));
         impl.pipeline_cache_path = install::user_data_directory() / "pipeline_cache.bin";
     } catch (const std::exception &e) {
         std::cout << "[textures] cannot look for a texture pack: " << e.what() << "\n";
@@ -4166,7 +4169,29 @@ VulkanRenderer::Impl::Texture &VulkanRenderer::Impl::texture_for(const GuestMemo
     if (pack_in_use) texture_pack.dump(pack_key, width, height, pixels.data());
     const PackedTexture *replacement = nullptr;
     bool pack_on_the_way = false;
-    if (texture_pack_enabled) {
+    // Lettering and interface art are left to the engine rather than the pack.
+    //
+    // For a texture drawn from a handful of colours, enlarging it texel for
+    // texel gives back the original art at a larger size -- the same picture,
+    // edges intact. A replacement cannot improve on that; it can only differ.
+    // Measured on this game's own menu text, running it through a resampler
+    // turns six alpha levels into two hundred and fifty-six and drops the
+    // peaks, which is what makes enlarged letters look soft and faded.
+    //
+    // This is decided here, on the decoded texels, rather than by removing
+    // files from the pack. Ac!d re-palettises its interface art at run time,
+    // so the texture the game draws often has a different content key from
+    // anything in the archives: on the title screen alone, 77 of the drawn
+    // interface textures appear in no archive at all. Only the renderer, which
+    // has the decoded image in hand, is in a position to recognise them.
+    //
+    // Only when the engine is actually going to enlarge it. With scaling off
+    // there is nothing to reproduce, and a replacement is then the only way to
+    // get a larger image than the guest's own.
+    const bool engine_reproduces_it =
+        engine_interface_art && texture_scale > 1u && texture_scale_sharp && !rewritten_in_place &&
+        looks_like_pixel_art(pixels, width, height);
+    if (texture_pack_enabled && !engine_reproduces_it) {
         const perf::spike::Scope timing(perf::spike::Stage::Pack);
         // find_ready never decodes here: it returns what a worker has already
         // finished and queues the rest. MGA_SYNC_PACK restores the old
@@ -5120,6 +5145,19 @@ void VulkanRenderer::set_texture_pack(bool enabled) {
     std::cout << "[textures] texture pack " << (enabled ? "on" : "off");
     if (enabled && !impl.texture_pack.available()) std::cout << " (none found)";
     std::cout << "\n";
+}
+
+void VulkanRenderer::set_engine_interface_art(bool enabled) {
+    Impl &impl = *impl_;
+    if (!impl.ready || impl.recording || impl.engine_interface_art == enabled) return;
+    impl.engine_interface_art = enabled;
+    // Which of the two enlarged a texture was decided when it was uploaded, so
+    // the cached images are the old answer and have to go.
+    vkDeviceWaitIdle(impl.device);
+    for (auto &[key, texture] : impl.textures) impl.destroy_texture(texture);
+    impl.textures.clear();
+    impl.list_texture_keys.clear();
+    std::cout << "[textures] interface art enlarged by the " << (enabled ? "engine" : "pack") << "\n";
 }
 
 [[nodiscard]] bool VulkanRenderer::texture_pack_available() const noexcept {

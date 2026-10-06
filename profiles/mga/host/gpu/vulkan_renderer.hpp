@@ -136,6 +136,10 @@ public:
     // there. Does nothing without a pack.
     void set_texture_pack(bool enabled);
     [[nodiscard]] bool texture_pack_available() const noexcept;
+    // Whether the engine enlarges the interface art Ac!d re-palettises as it
+    // runs, instead of the pack standing in for it. Baked into the uploaded
+    // image, so changing it drops the cache the same way the pack does.
+    void set_engine_interface_art(bool enabled);
     void set_smart_2d(bool smart);
     // Shows the frame through a shader pass instead of a blit, and turns
     // anti-aliasing on within it. Anti-aliasing does nothing on its own.

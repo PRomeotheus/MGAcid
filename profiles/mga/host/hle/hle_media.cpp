@@ -29,6 +29,7 @@
 #include <cstring>
 #include <array>
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <sstream>
@@ -634,6 +635,43 @@ void present_frame(Runtime &rt) {
             const auto name = "shot_" + std::to_string(renderer.frames_presented()) + ".bmp";
             renderer.capture_window(install::path_to_utf8(folder / name));
             std::cout << "[render] screenshot -> " << install::path_to_utf8(folder / name) << "\n";
+        }
+    }
+
+    // F7: the guest's memory, written whole.
+    //
+    // Finding where one of the game's own settings lives is a search for a few
+    // bytes in thirty-two megabytes, and the quickest route is to change the
+    // setting and see what moved. Two dumps either side of a change, compared
+    // by tools/find_setting.py, narrow it to a handful of addresses; a third
+    // confirms. No disassembly needed.
+    if (ui::ram_dump_requested()) {
+        std::error_code code;
+        const auto folder = install::user_data_directory() / "ram";
+        std::filesystem::create_directories(folder, code);
+        if (code) {
+            std::cout << "[ram] cannot make a ram folder: " << code.message() << "\n";
+        } else {
+            constexpr std::uint32_t kBase = 0x08000000u;
+            constexpr std::uint32_t kSize = 0x02000000u;
+            if (const std::uint8_t *memory = rt.memory().raw_pointer(kBase, kSize)) {
+                // The next name nothing is using, found by looking rather than
+                // by counting. A counter living in this process starts again at
+                // one every time the game is launched, so a second session
+                // quietly wrote over the first session's dumps -- and a
+                // comparison between two files that are no longer the ones you
+                // captured is worse than no comparison at all.
+                unsigned taken = 0u;
+                std::filesystem::path path;
+                do {
+                    path = folder / ("ram_" + std::to_string(++taken) + ".bin");
+                } while (std::filesystem::exists(path, code) && taken < 10000u);
+                std::ofstream out(path, std::ios::binary);
+                out.write(reinterpret_cast<const char *>(memory), static_cast<std::streamsize>(kSize));
+                std::cout << "[ram] wrote " << install::path_to_utf8(path) << "\n";
+            } else {
+                std::cout << "[ram] the guest's memory is not mapped contiguously\n";
+            }
         }
     }
 

@@ -11,6 +11,8 @@
 #include "hle_common.hpp"
 
 #include "audio/atrac_decoder.hpp"
+#include "audio/music_pack.hpp"
+#include "settings/settings.hpp"
 
 #include "psprecomp/common.hpp"
 
@@ -71,6 +73,7 @@ struct TrackInfo {
     std::int32_t loop_start{-1};  // positions, -1 without a loop
     std::int32_t loop_end{-1};
     std::uint32_t skip{};         // decoded samples before position 0
+    std::uint64_t key{};          // identity of the stream, for the music pack
 };
 
 struct AtracContext {
@@ -85,6 +88,12 @@ struct AtracContext {
     std::int64_t next_frame{};
     std::int64_t cached_frame{-1};
     std::vector<std::int16_t> cached;
+    // A replacement recording standing in for this cue, or null to play the
+    // guest's own audio. It is indexed by decoded-stream sample, the same
+    // timeline as `cached`, so nothing else in here has to change.
+    std::unique_ptr<audio::MusicTrack> replacement;
+    // Which source the last frame came from, so a change of mind is noticed.
+    bool played_replacement{};
 };
 
 std::array<std::unique_ptr<AtracContext>, kMaxAtracIds> &contexts() {
@@ -176,6 +185,13 @@ std::optional<std::uint32_t> parse_header(const psprecomp::GuestMemory &memory, 
         info.loop_start = static_cast<std::int32_t>(loop->first - fact_offset);
         info.loop_end = std::min(static_cast<std::int32_t>(loop->second - fact_offset), info.end_sample);
     }
+    // Identify the stream while its opening bytes are still to hand. A buffer
+    // too short to cover them yields key 0, and the cue simply plays its own
+    // audio rather than risk matching another cue's replacement.
+    const std::size_t audio_bytes = bytes.size() > info.data_offset ? bytes.size() - info.data_offset : 0u;
+    info.key = audio::music_key(info.file_size, info.data_size, info.channels, info.block_align,
+                                static_cast<std::uint32_t>(info.codec), bytes.data() + info.data_offset,
+                                audio_bytes);
     return std::nullopt;
 }
 
@@ -189,6 +205,24 @@ bool load_frame(const psprecomp::GuestMemory &memory, AtracContext &context, std
     if (frame == context.cached_frame) return true;
     const TrackInfo &track = context.track;
     const std::size_t frame_samples = audio::atrac_frame_samples(track.codec);
+    // Decided per frame rather than when the track was opened: the player can
+    // switch the replacement off while a track is playing, to hear the two
+    // against each other. Changing source leaves the ATRAC decoder's state
+    // describing somewhere this stream no longer is, so the switch also forces
+    // the reseed below instead of letting it believe it is still in sequence.
+    const bool use_replacement = context.replacement && settings::current().music_pack;
+    if (use_replacement != context.played_replacement) {
+        context.played_replacement = use_replacement;
+        context.next_frame = -1;
+    }
+    if (use_replacement) {
+        context.cached.assign(frame_samples * 2u, 0);
+        context.replacement->read(frame * static_cast<std::int64_t>(frame_samples), context.cached.data(),
+                                  frame_samples);
+        context.next_frame = frame + 1;
+        context.cached_frame = frame;
+        return true;
+    }
     context.cached.assign(frame_samples * 2u, 0);
     std::vector<std::uint8_t> bytes(track.block_align);
     const auto decode = [&](std::int64_t index) {
@@ -257,11 +291,13 @@ void register_atrac_functions(HleRegistrar &hle) {
         }
         context->buffer = buffer;
         context->buffer_size = buffer_size;
+        context->replacement = audio::music_pack().open_for(track.key);
         const auto id = static_cast<std::uint32_t>(slot - table.begin());
         std::ostringstream details;
         details << "file=" << track.file_size << " align=" << track.block_align << " channels=" << track.channels
                 << " end=" << track.end_sample << " loop=" << track.loop_start << ".." << track.loop_end
-                << " skip=" << track.skip;
+                << " skip=" << track.skip << " key=" << audio::music_key_name(track.key)
+                << (context->replacement ? " replaced" : "");
         *slot = std::move(context);
         finish_traced(ctx, "sceAtracSetDataAndGetID", id, details.str());
     });
@@ -569,6 +605,7 @@ bool read_atrac_state(psprecomp::SnapshotReader &in, const psprecomp::GuestMemor
             log_once("atrac-state-open", "[atrac] a track in this state could not be decoded again");
             continue;
         }
+        context->replacement = audio::music_pack().open_for(track.key);
         context->buffer = buffer;
         context->buffer_size = buffer_size;
         context->loop_num = loop_num;

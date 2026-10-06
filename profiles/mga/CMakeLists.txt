@@ -64,6 +64,7 @@ if(MGA_RENDERER)
             host/gpu/shadow_map.cpp
             host/gpu/vulkan_renderer.cpp
             host/ui/file_browser.cpp
+            host/ui/folders_screen.cpp
             host/ui/font_menu.cpp
             host/ui/input_script.cpp
             host/ui/layer.cpp
@@ -315,6 +316,18 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     # graphics driver loads.
     set(MGA_RELEASE_LINK_OPTIONS -static-libstdc++ "LINKER:--exclude-libs,libstdc++.a:libsupc++.a")
     target_link_options(MGAcid PRIVATE ${MGA_RELEASE_LINK_OPTIONS})
+elseif(WIN32)
+    # No console. A released game started from Explorer should not put a
+    # terminal behind its window, and the diagnostics it used to print there
+    # go to the log file beside the executable instead (see main.cpp). SDL's
+    # entry point supplies the WinMain the GUI subsystem links against.
+    set_target_properties(MGAcid PROPERTIES WIN32_EXECUTABLE TRUE)
+    if(TARGET SDL3::SDL3main)
+        target_link_libraries(MGAcid PRIVATE SDL3::SDL3main)
+    endif()
+endif()
+if(MGA_RELEASE)
+    target_compile_definitions(MGAcid PRIVATE MGA_RELEASE_BUILD=1)
 endif()
 set_target_properties(MGAcid PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"

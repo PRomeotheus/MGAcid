@@ -29,8 +29,8 @@ packaging="$profile_dir/packaging/linux"
 # shellcheck source=../packaging/linux/sources.sh
 source "$packaging/sources.sh"
 
-app_id=io.github.teamgdb.Yakumo
-work="${YAKUMO_WORK:-$repo_dir/out/release-linux}"
+app_id=io.github.promeotheus.MGAcid
+work="${MGA_WORK:-$repo_dir/out/release-linux}"
 dist="$work/dist"
 stage="$work/stage/mgacid"
 
@@ -182,7 +182,7 @@ if [[ $skip_build -eq 0 ]]; then
     mkdir -p "$work/home"
     "$container" run --rm "${user_args[@]}" --security-opt label=disable \
         "${mounts[@]}" -w "$repo_dir" \
-        -e HOME="$work/home" -e YAKUMO_WORK="$work" -e YAKUMO_JOBS="$jobs" \
+        -e HOME="$work/home" -e MGA_WORK="$work" -e MGA_JOBS="$jobs" \
         "$SDK_IMAGE" bash "$packaging/build_in_sdk.sh"
 fi
 
@@ -229,7 +229,9 @@ if [[ $make_flatpak -eq 1 ]]; then
     cp -al "$stage" "$source_dir/mgacid"
     install -m 755 "$packaging/mgacid.sh" "$source_dir/files/mgacid"
     install -m 644 "$packaging/$app_id.desktop" "$source_dir/files/"
-    install -m 644 "$repo_dir/docs/images/emblem.svg" "$source_dir/files/$app_id.svg"
+    for size in 64 128 256 512; do
+        install -m 644 "$packaging/icons/$size.png" "$source_dir/files/icon-$size.png"
+    done
     sed -e "s/@VERSION@/$version/" -e "s/@DATE@/$(date -u -d "@$SOURCE_DATE_EPOCH" +%Y-%m-%d)/" \
         "$packaging/$app_id.metainfo.xml" > "$source_dir/files/$app_id.metainfo.xml"
     cp "$packaging/$app_id.yml" "$source_dir/"

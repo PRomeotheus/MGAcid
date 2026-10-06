@@ -7,6 +7,7 @@
 #include "ui/font_menu.hpp"
 #include "ui/input_script.hpp"
 #include "ui/layer.hpp"
+#include "ui/folders_screen.hpp"
 #include "ui/save_screen.hpp"
 #include "ui/savedata_dialog.hpp"
 #include "ui/text_input.hpp"
@@ -56,9 +57,9 @@ using Clock = std::chrono::steady_clock;
 // Seconds the "how to open the menu" hint stays up at start, until the menu
 // has been opened once.
 constexpr double kHintSeconds = 12.0;
-// The longest hunter name the game takes: its name buffer holds 12
-// characters and a terminator.
-constexpr std::size_t kHunterNameLength = 12u;
+// The longest name the game takes: its name buffer holds 12 characters
+// and a terminator.
+constexpr std::size_t kPlayerNameLength = 12u;
 // Resolutions the menu offers. MGA_INTERNAL_SCALE goes up to 8, but a
 // setting that runs out of video memory would fail on every start.
 constexpr int kMenuMaxInternalScale = 6;
@@ -255,13 +256,6 @@ void Menu::video() {
         renderer().set_sharp_screen(s.sharp_screen);
         settings::save();
     }
-    {
-        RowOptions o = options_for("video.fast_loading", "Skips the waiting the PSP needed for its disc, so loading passes quickly.");
-        if (toggle_row("Fast loading", s.fast_loading, o)) {
-            s.fast_loading = !s.fast_loading;
-            settings::save();
-        }
-    }
     section("Textures");
     if (choice_row("Texture filter", s.sharp_textures ? "Sharp" : "Smooth",
                    options_for("video.sharp_textures", "How the game's textures are sampled: smooth (bilinear) or "
@@ -272,9 +266,8 @@ void Menu::video() {
     }
     {
         RowOptions o = options_for("video.smooth_textures",
-                                   "Mipmaps and anisotropic filtering. The PSP sampled one texture level whatever "
-                                   "the distance, which shimmers once the internal resolution is raised above the "
-                                   "480x272 that hid it. Off is what the game did.");
+                                   "Mipmaps and anisotropic filtering, so distant textures stop shimmering at a "
+                                   "raised internal resolution. Off is what the PSP did.");
         o.disabled = s.sharp_textures;
         if (o.disabled) o.note = "sharp filtering";
         if (toggle_row("Smooth distant textures", s.smooth_textures && !s.sharp_textures, o)) {
@@ -285,9 +278,8 @@ void Menu::video() {
     }
     {
         RowOptions o = options_for("video.smart_2d",
-                                   "Draws that place one texel on one screen pixel -- the interface, the cards, "
-                                   "text -- are sampled sharp whatever the filter above says. Smooth filtering "
-                                   "suits the 3D scene but softens flat art that was drawn to be exact.");
+                                   "Samples the interface, the cards and text sharp whatever the filter above "
+                                   "says, so flat art drawn texel by texel stays exact.");
         o.disabled = s.sharp_textures;
         if (o.disabled) o.note = "already sharp";
         if (toggle_row("Keep 2D art sharp", s.smart_2d && !s.sharp_textures, o)) {
@@ -305,9 +297,8 @@ void Menu::video() {
         else std::snprintf(label, sizeof(label), "%ux", s.texture_scale);
         if (const int delta = choice_row("Texture scaling", label,
                        options_for("video.texture_scale",
-                                   "Enlarges the game's textures before they are drawn, so they keep their detail "
-                                   "at a raised internal resolution instead of being blurred up to it. Costs memory "
-                                   "and a moment's work the first time each texture is seen."))) {
+                                   "Enlarges textures before they are drawn, so they keep their detail at a "
+                                   "raised internal resolution instead of being blurred up to it."))) {
             // Left and right both used to step up: the row tested only
             // whether a key had been pressed and then always incremented,
             // throwing the direction away. Every other row cycles on the
@@ -346,9 +337,8 @@ void Menu::video() {
         // keeps letters and hard edges crisp; handing them to the pack is what
         // someone who has edited one by hand wants.
         RowOptions o = options_for("video.engine_interface_art",
-                                   "Who enlarges the interface art the game recolours as it runs. The engine keeps "
-                                   "small text and hard edges crisp. The texture pack uses your own replacement "
-                                   "instead, which is what you want once you have edited one by hand.");
+                                   "Who enlarges the interface art the game recolours as it runs: the engine, or "
+                                   "the pack.");
         const bool pack = renderer().texture_pack_available() && s.texture_pack;
         o.disabled = s.texture_scale <= 1u || !s.texture_scale_sharp || !pack;
         if (s.texture_scale <= 1u) o.note = "scaling off";
@@ -446,9 +436,8 @@ void Menu::video() {
     section("Post-processing");
     {
         RowOptions o = options_for("video.post_process",
-                                   "Shows the finished frame through a shader pass instead of copying it straight "
-                                   "to the window. On its own it changes nothing; it is what the effects below "
-                                   "need in order to read more than one pixel at a time.");
+                                   "Shows the frame through a shader pass instead of copying it straight to the "
+                                   "window. On its own it changes nothing; the effects below need it.");
         if (toggle_row("Post-processing", s.post_process, o)) {
             s.post_process = !s.post_process;
             renderer().set_post_processing(s.post_process, s.fxaa);
@@ -893,8 +882,7 @@ void Menu::controls() {
     }
     int dead_zone = static_cast<int>(std::lround(s.dead_zone * 100.0f));
     if (slider_row("Stick dead zone", dead_zone, 0, 50, 1, "%d%%",
-                   options_for("input.dead_zone", "How far the left stick moves before the hunter does. Raise it if "
-                                                  "the hunter drifts."))) {
+                   options_for("input.dead_zone", "How far the left stick moves. Raise if it drifts."))) {
         s.dead_zone = static_cast<float>(dead_zone) / 100.0f;
         settings::save();
     }
@@ -961,7 +949,7 @@ void Menu::controls() {
             settings::save();
         }
     }
-    if (text_row("name", "Hunter name", s.name, kHunterNameLength, false, hunter_name_character,
+    if (text_row("name", "Player name", s.name, kPlayerNameLength, false, player_name_character,
                  options_for("input.name", "Given when the game asks for a name and the on-screen keyboard is "
                                            "off, and to other players when the network nickname is empty. "
                                            "Letters, digits, spaces and simple punctuation.")))
@@ -1190,7 +1178,7 @@ void Menu::network() {
         adhoc_apply_settings();
     }
     if (text_row("nickname", "Nickname", s.adhoc_nickname, 32u, true, printable_ascii,
-                 options_for("network.nickname", "The name other players and the server see. Empty: the hunter name. "
+                 options_for("network.nickname", "The name other players and the server see. Empty: the player name. "
                                                  "Applies the next time the game goes on line."))) {
         settings::save();
         adhoc_apply_settings();
@@ -1291,6 +1279,7 @@ void Menu::network() {
 }
 
 void Menu::system() {
+    if (folder_screen(back_)) return;
     if (save_screen(back_)) {
         if (take_restart_request()) {
             install::request_restart_on_exit();
@@ -1337,6 +1326,9 @@ void Menu::system() {
     section("Saves");
     save_rows();
 
+    section("Folders");
+    folder_rows();
+
     section("Keys");
     info_row("Fast forward", "hold Tab");
     info_row("Screenshot", "F12");
@@ -1349,9 +1341,8 @@ void Menu::system() {
         settings::Settings &st = settings::current();
         if (toggle_row("Function keys save and load", st.state_hotkeys,
                        options_for("input.state_hotkeys",
-                                   "F1 to F4 save a state to that slot; hold shift to load it instead. The "
-                                   "modifier is on loading because a stray load costs the game you are playing, "
-                                   "where a stray save costs only what was in the slot."))) {
+                                   "F1 to F4 save a state to that slot; hold shift to load it instead. A stray "
+                                   "load costs the game you are playing, so loading takes the modifier."))) {
             st.state_hotkeys = !st.state_hotkeys;
             settings::save();
         }

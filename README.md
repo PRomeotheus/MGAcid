@@ -1,64 +1,49 @@
-<p align="center"><img src="docs/images/logo.svg" alt="Yakumo" width="720"></p>
+# MGAcid
 
-<p align="center"><b>English</b> · <a href="README.ru.md">Русский</a> · <a href="README.es.md">Español</a></p>
+A native port of **Metal Gear Ac!d** (USA, `ULUS-10006`) made by static recompilation: the game's PSP code is translated ahead of time into C++ and compiled for your machine, then run on a reimplementation of the PSP system software. It is not an emulator — there is no interpreter or JIT at the heart of it — and it is not a decompilation.
 
-# Yakumo
-
-A native port of **Monster Hunter Portable 3rd HD Ver.** made by static recompilation: the game's PSP code is translated ahead of time into C++ and compiled for your machine, then run on a reimplementation of the PSP system software. It is not an emulator — there is no interpreter or JIT at the heart of it — and it is not a decompilation.
-
-> **This project does not include any game assets.** You must provide the files from your own legally obtained copy of Monster Hunter Portable 3rd HD Ver. (`NPJB-40001`) to install or build Yakumo.
+> **This project does not include any game assets.** You must provide the files from your own legally obtained copy of Metal Gear Ac!d (`ULUS-10006`) to install or build MGAcid.
 
 ## Legal disclaimer
 
-**Yakumo** is an independent, open-source project and is not affiliated with, authorized by, sponsored by, or endorsed by CAPCOM, Sony, or any of their affiliates.
+**MGAcid** is an independent, open-source project and is not affiliated with, authorized by, sponsored by, or endorsed by Konami, Sony, or any of their affiliates.
 
-Monster Hunter, Monster Hunter Portable 3rd HD Ver., CAPCOM, PlayStation, PSP, and all related trademarks, game assets, artwork, audio, characters, and other intellectual property belong to their respective owners.
+Metal Gear, Metal Gear Ac!d, KONAMI, PlayStation, PSP, and all related trademarks, game assets, artwork, audio, characters, and other intellectual property belong to their respective owners.
 
-**Yakumo** does not include any game assets or original game files: no disc image, no copy of the game's executable or data, and no textures, models, audio or video from the game. You must provide the files from your own legally obtained copy of Monster Hunter Portable 3rd HD Ver. to install or build **Yakumo**; the installer checks that copy and accepts only the original release.
-
-To use **Yakumo**, users must provide the required files from their own legally obtained copy of Monster Hunter Portable 3rd HD Ver. for PlayStation 3.
+**MGAcid** does not include any game assets or original game files: no disc image, no copy of the game's executable or data, and no textures, models, audio or video from the game. You must provide the files from your own legally obtained copy of Metal Gear Ac!d to install or build **MGAcid**; the installer checks that copy and accepts only the original release.
 
 Users are solely responsible for obtaining, dumping, extracting, and using their game copy in accordance with the laws applicable in their jurisdiction.
 
-**Yakumo** does not support, provide, link to, or encourage the use of unauthorized or pirated copies of the game.
+**MGAcid** does not support, provide, link to, or encourage the use of unauthorized or pirated copies of the game.
 
 Any references to the original game or its trademarks are made solely for identification, compatibility, and interoperability purposes.
 
-Screenshots and other depictions of the original game may be used solely to document or demonstrate **Yakumo's** functionality. All depicted third-party game content remains the property of its respective rights holders.
+Screenshots and other depictions of the original game may be used solely to document or demonstrate **MGAcid's** functionality. All depicted third-party game content remains the property of its respective rights holders.
 
-The license covering **Yakumo** applies only to the project's own original code and materials and does not grant any rights to third-party intellectual property.
+The license covering **MGAcid** applies only to the project's own original code and materials and does not grant any rights to third-party intellectual property.
 
-**Yakumo** provides the software, not the game. You must provide your own legally obtained copy.
+**MGAcid** provides the software, not the game. You must provide your own legally obtained copy.
 
-## Status: playable
+## Status: in development
 
-You can load a save copied from a PSP or start a new game, hunt, and save your progress, with music, the opening movie, lighting, a keyboard or a gamepad, and an in-game settings menu (Esc, or L3+R3). The game runs at the PSP's speed, 30 frames per second.
+The game boots, plays and saves. The parts below are what has actually been exercised; this is not a finished compatibility report, and anything not listed has not been verified rather than been found broken.
 
-| Works | Missing or rough |
+| Works | Rough or unverified |
 | --- | --- |
-| Booting, menus, character creation, the village and hunting areas | On a Steam Deck, lighting slows the busiest village spots slightly below full speed (#7) |
-| Saves in the PSP's own format, including saves and downloaded quests copied from a PSP; import, export and back up from the menu | Curved surfaces (#10); the save-data dialogs draw nothing yet (#33) |
-| 3D models, animation, textures, transparency, lighting and fog | |
-| Sound effects, streamed music and cutscene movies | |
-| Keyboard, and gamepads with a real right-stick camera; an on-screen keyboard for names | |
-| An in-game menu with video, audio, control, network and save settings | |
-| All 355 code overlays recompiled | |
-| Multiplayer: through the ad hoc servers PSP players use, or hosted from the game on a LAN or VPN | |
+| Booting, the title screen, menus and the stages reached so far | Compatibility has not been mapped stage by stage |
+| The game's own save data, in the PSP's format | The save-data dialogs are inherited from the upstream profile and are not fully adapted |
+| 3D models, animation, textures, transparency and lighting | Curved surfaces are approximated |
+| Sound effects and streamed ATRAC3plus music | |
+| Replacement music: your own recordings in place of the game's cues, switchable while a track plays | |
+| A replacement texture pack, with optional 2x–4x upscaling and an edge-preserving filter for art drawn texel by texel | |
+| Keyboard and gamepad, with an on-screen keyboard for names | |
+| An in-game menu (Esc, or L3+R3) for video, audio, controls, saves and folders | |
 
-Tested on macOS (Apple Silicon, Vulkan through MoltenVK), on a Steam Deck in Game Mode with native Vulkan and the built-in controls, and on Windows 11 with MSVC. On Windows, creating a character, saving several times, restarting the game and loading the save all work.
-
-The state of each part of the game on each platform is in [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md).
-
-## Play
-
-A prebuilt release needs nothing but your disc image. Download one from the [releases page](https://github.com/TeamGDB/Yakumo/releases), start it, and point the first-run setup at your image: it checks the image, prepares the game from it and keeps everything in a per-user directory.
-
-- **Linux and Steam Deck:** a Flatpak bundle and a portable tarball. [`docs/LINUX.md`](docs/LINUX.md) covers installing, the first start, Game Mode, where saves live, updating and uninstalling.
-- **macOS and Windows:** no prebuilt release yet; build from source as below.
+Multiplayer is **not** supported: the ad hoc networking in the tree comes from the upstream profile and is specific to that game.
 
 ## Requirements
 
-Building from source is a fully supported way to play. It needs:
+Building from source is currently the way to play. It needs:
 
 - Your own copy of the game (see above)
 - CMake 3.20 or newer, Ninja and a C++20 compiler
@@ -69,33 +54,54 @@ Building from source is a fully supported way to play. It needs:
 
 ## Getting started
 
-In short:
+```bash
+# 1. Configure and build the bootstrap
+cmake -S . -B out/mga -G Ninja -DCMAKE_BUILD_TYPE=Release -DPSPRECOMP_PROFILE=mga \
+      -DCMAKE_PREFIX_PATH="/path/to/SDL3"
+cmake --build out/mga --target MGAcid
 
-1. Prepare the game's executable from your disc image: build `Yakumo` once without recompiled code and run it with `--install /path/to/image.iso`. No external decryption tool is needed. Then link the image and that executable into the profile with `profiles/mhp3rd/scripts/prepare_game.sh`.
-2. Configure, generate the recompiled code with `profiles/mhp3rd/scripts/generate.sh`, and build `Yakumo`.
-3. Recompile the code overlays with `profiles/mhp3rd/scripts/build_overlays.sh` (about 40 minutes the first time; resumable).
-4. Run `out/mhp3rd/bin/Yakumo`.
+# 2. Game data: extracts BOOT.BIN as EBOOT.ELF and links the image
+profiles/mga/scripts/prepare_game.sh "/path/to/Metal Gear Acid (USA).iso"
 
-The full instructions, including every setting, are in [`profiles/mhp3rd/README.md`](profiles/mhp3rd/README.md). Building on every platform, Windows included, how long each stage takes, and how to work on the code without full rebuilds: [`docs/BUILDING.md`](docs/BUILDING.md).
+# 3. Generate the recompiled executable and build it
+profiles/mga/scripts/generate.sh
+cmake -S . -B out/mga && cmake --build out/mga --target MGAcid
+
+# 4. Recompile the game's own libraries and rebuild
+profiles/mga/scripts/generate_modules.sh
+cmake -S . -B out/mga && cmake --build out/mga --target MGAcid
+
+# 5. Run
+out/mga/bin/MGAcid
+```
+
+The full instructions, every environment variable and how the stages are recompiled are in [`profiles/mga/README.md`](profiles/mga/README.md). Building on each platform is in [`docs/BUILDING.md`](docs/BUILDING.md).
+
+## Your files
+
+MGAcid keeps three folders beside the executable, so an installation is self-contained and can be moved or carried on a drive:
+
+```text
+ms0/        the game's memory stick: its saves
+textures/   replacement textures, with a README listing what is expected
+music/      replacement music, with a README naming the cue each file replaces
+```
+
+Any of the three can be pointed somewhere else from the menu, under System → Folders. An installation that already keeps them in the per-user data directory goes on using it, and says so once at startup.
 
 ## Controls
 
-On a gamepad the buttons are where you expect them: on a PlayStation pad circle confirms and cross backs out, as the game's prompts say, and the right stick drives the camera. On a keyboard the arrow keys are the D-pad, I/J/K/L the analog stick, X and Z are ○ and ✕, A and S are □ and △, Q and W are L and R, and Enter is START. Both tables are in the [profile README](profiles/mhp3rd/README.md#running).
+On a gamepad the buttons are where you expect them, and the right stick drives the camera. On a keyboard the arrow keys are the D-pad, I/J/K/L the analog stick, X and Z are ○ and ✕, A and S are □ and △, Q and W are L and R, and Enter is START.
 
-Esc, or both sticks pressed together (L3+R3), opens Yakumo's own menu: it pauses the game and holds the settings for video, sound and controls, which are kept between runs. The first start sets the game up from your disc image in the same window, and works with a gamepad alone.
-
-## Roadmap
-
-- Prebuilt releases, starting with Linux and the Steam Deck (#29)
-- 60 fps through frame interpolation, with the game still simulating at 30 (#39)
+Esc, or both sticks pressed together (L3+R3), opens MGAcid's own menu: it pauses the game and holds the settings, which are kept between runs.
 
 ## How it works
 
-The executable is analyzed and every instruction of its code is emitted as C++, which is compiled into the program. The game also loads 355 code overlays at run time into a handful of shared memory slots; each is recompiled into its own library, and when the game loads one, the matching library is installed between frames. An interpreter covers any code the recompiled set does not reach, so nothing stops the game — it only runs slower there.
+The executable is analyzed and every instruction of its code is emitted as C++, which is compiled into the program. The game also loads its own PRX modules — the file system, the sound driver, zlib and every stage — at run time; each is recompiled into its own corpus, and an interpreter covers any code the recompiled set does not reach, so nothing stops the game, it only runs slower there.
 
 Around that code sits a reimplementation of the PSP system: a kernel with threads, semaphores, event flags and timers; disc I/O read straight from the image; a Vulkan renderer for the PSP's graphics engine; software voice mixing for audio; and input from SDL3.
 
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) describes the execution model and [`docs/DATA_BIN.md`](docs/DATA_BIN.md) the game's archive format. [`docs/TESTING.md`](docs/TESTING.md) has the smoke test and how to report results.
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) describes the execution model. [`docs/TESTING.md`](docs/TESTING.md) has the smoke test.
 
 ## Repository layout
 
@@ -104,9 +110,9 @@ include/psprecomp/   Framework interfaces: runtime, memory, Allegrex state
 src/                 Framework: ELF loading, decoder, runtime, interpreter
 tools/               Framework: analyzer and C++ code generator
 tests/               Framework regression tests
-configs/             PSP NID data and generic examples
-profiles/mhp3rd/     Everything specific to this game: host, kernel, renderer,
-                     audio, input, configuration and build scripts
+profiles/mga/        Everything specific to Metal Gear Ac!d: host, kernel,
+                     renderer, audio, input, configuration and build scripts
+profiles/mhp3rd/     The upstream profile this one was derived from
 docs/                Architecture, archive format, profile guide, source rules
 ```
 
@@ -114,31 +120,17 @@ The recompiled code itself is generated locally from your copy of the game and i
 
 ## Built on PSPRecomp
 
-**Yakumo** is built on [PSPRecomp](https://github.com/jessicanataliagta/PSPRecomp), a static recompilation framework for PSP software. The framework is game-neutral and can be built on its own:
-
-```bash
-cmake -S . -B out/framework -DPSPRECOMP_PROFILE=""
-cmake --build out/framework --config Release
-ctest --test-dir out/framework -C Release --output-on-failure
-```
-
-To target another title, see [`docs/PROFILE_GUIDE.md`](docs/PROFILE_GUIDE.md). [`docs/SOURCE_PROVENANCE.md`](docs/SOURCE_PROVENANCE.md) sets out the rules for independently written code and third-party source.
-
-## Authors
-
-- [@MHunterG](https://github.com/MHunterG)
-- [@mojitosunrise](https://github.com/mojitosunrise)
+**MGAcid** is built on [PSPRecomp](https://github.com/jessicanataliagta/PSPRecomp), a static recompilation framework for PSP software, and started from [Yakumo](https://github.com/TeamGDB/Yakumo), its Monster Hunter Portable 3rd HD port, whose host layer this profile was derived from. That profile is still in the tree and keeps its own README.
 
 ## Credits
 
 - [PSPRecomp](https://github.com/jessicanataliagta/PSPRecomp) — the recompilation framework this project builds on
+- [Yakumo](https://github.com/TeamGDB/Yakumo) — the host layer this profile was derived from
 - [SDL3](https://www.libsdl.org/) — windowing, input and audio output
 - [FFmpeg](https://ffmpeg.org/) — music and movie decoding
-- [Vulkan](https://www.vulkan.org/) and [MoltenVK](https://github.com/KhronosGroup/MoltenVK) — rendering
+- [Vulkan](https://www.vulkan.org/) — rendering
 - [stb_truetype](https://github.com/nothings/stb) — font rasterization
-- [svanheulen/mhef](https://github.com/svanheulen/mhef) — community documentation of the game's archive format
-- [Cinzel](https://github.com/NDISCOVER/Cinzel) and [Shippori Mincho](https://github.com/fontdasu/ShipporiMincho) — the logo's lettering, under the SIL Open Font License
 
 ## License
 
-The repository is distributed under the MIT License; see [`LICENSE`](LICENSE). Third-party files keep their own notices beside them — currently `profiles/mhp3rd/third_party/stb_truetype.h`, under MIT or public domain.
+The repository is distributed under the MIT License; see [`LICENSE`](LICENSE). Third-party files keep their own notices beside them.

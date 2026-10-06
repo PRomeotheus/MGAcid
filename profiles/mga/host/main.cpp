@@ -12,6 +12,12 @@
 #include "install/game_identity.hpp"
 #include "install/installer.hpp"
 #include "install/user_data.hpp"
+
+#if defined(MGA_HAS_SDL)
+// Renames main to SDL_main and provides the platform entry point. A release on
+// Windows is built for the GUI subsystem, which links WinMain rather than main.
+#include <SDL3/SDL_main.h>
+#endif
 #include "settings/settings.hpp"
 #include "kernel/kernel.hpp"
 #include "kernel/module_loader.hpp"
@@ -28,6 +34,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <optional>
@@ -330,9 +337,50 @@ int run_adhoc_server(int argc, char **argv) {
 
 } // namespace
 
+// A release has no console on Windows, so what the program prints would be
+// lost. It goes to a file beside the executable instead, replaced each run, so
+// a player's report can carry the detail without a terminal ever appearing.
+// MGA_LOG=console leaves the streams alone, for running it from a terminal.
+class LogFile {
+public:
+    bool open(const std::filesystem::path &path) {
+        file_.open(path, std::ios::out | std::ios::trunc);
+        if (!file_) return false;
+        out_ = std::cout.rdbuf(file_.rdbuf());
+        err_ = std::cerr.rdbuf(file_.rdbuf());
+        return true;
+    }
+    // Put the streams back before the file closes: anything printed during
+    // static destruction would otherwise write through a dangling buffer.
+    ~LogFile() {
+        if (out_ != nullptr) std::cout.rdbuf(out_);
+        if (err_ != nullptr) std::cerr.rdbuf(err_);
+    }
+    LogFile() = default;
+    LogFile(const LogFile &) = delete;
+    LogFile &operator=(const LogFile &) = delete;
+
+private:
+    std::ofstream file_;
+    std::streambuf *out_{};
+    std::streambuf *err_{};
+};
+
 int main(int argc, char **argv) {
 #if defined(__linux__)
     ensure_main_stack(argv);
+#endif
+    // Before anything prints. Kept for the whole run: its destructor puts the
+    // streams back, so it has to outlive everything that writes to them.
+    LogFile log;
+#if defined(MGA_RELEASE_BUILD)
+    {
+        const char *where = std::getenv("MGA_LOG");
+        if (where == nullptr || std::string(where) != "console") {
+            const std::filesystem::path beside = mga::executable_directory();
+            if (!beside.empty()) (void)log.open(beside / "MGAcid.log");
+        }
+    }
 #endif
     try {
         if (argc > 1 && std::string(argv[1]) == "--adhoc-server") return run_adhoc_server(argc, argv);

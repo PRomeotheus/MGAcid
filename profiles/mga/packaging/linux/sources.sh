@@ -21,8 +21,8 @@ NOTO_CJK_LICENSE_SHA256=6a73f9541c2de74158c0e7cf6b0a58ef774f5a780bf191f2d7ec9cc5
 # The build environment: the Steam Runtime 3 "sniper" SDK (Debian 11, glibc
 # 2.31), so the result runs on SteamOS and on most distributions of the last
 # few years, pinned by digest (the 3.0.20260805 SDK) so a rebuild uses the
-# same compilers; override with YAKUMO_SDK_IMAGE.
-SDK_IMAGE="${YAKUMO_SDK_IMAGE:-registry.gitlab.steamos.cloud/steamrt/sniper/sdk@sha256:1c33c507bc75d012e77df5727f93b0d5b8c3f7c8d4142ba5f7a16882cc92e014}"
+# same compilers; override with MGA_SDK_IMAGE.
+SDK_IMAGE="${MGA_SDK_IMAGE:-registry.gitlab.steamos.cloud/steamrt/sniper/sdk@sha256:1c33c507bc75d012e77df5727f93b0d5b8c3f7c8d4142ba5f7a16882cc92e014}"
 
 # The Flatpak runtime the bundle targets.
 FLATPAK_RUNTIME_VERSION=25.08

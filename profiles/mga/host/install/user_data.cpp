@@ -1,5 +1,7 @@
 #include "install/user_data.hpp"
 
+#include "install/folder_notes.hpp"
+
 #include "app_paths.hpp"
 
 #include "psprecomp/common.hpp"
@@ -115,8 +117,23 @@ std::filesystem::path data_folder(DataFolder which) {
 
 void create_data_folders() {
     std::error_code ec;
-    for (const DataFolder which : {DataFolder::Saves, DataFolder::Textures, DataFolder::Music})
-        std::filesystem::create_directories(data_folder(which), ec);
+    for (const DataFolder which : {DataFolder::Saves, DataFolder::Textures, DataFolder::Music}) {
+        const std::filesystem::path folder = data_folder(which);
+        std::filesystem::create_directories(folder, ec);
+
+        // What belongs in the folder, left where whoever opens it will see it
+        // rather than only in documentation they would have to go and find.
+        // Written only when it is absent: a player who has edited or replaced
+        // it keeps what they wrote.
+        const char *note = which == DataFolder::Music      ? kMusicFolderNote
+                           : which == DataFolder::Textures ? kTexturesFolderNote
+                                                           : nullptr;
+        if (note == nullptr) continue;
+        const std::filesystem::path path = folder / "README.txt";
+        if (std::filesystem::exists(path, ec)) continue;
+        std::ofstream out(path);
+        if (out) out << note;
+    }
 }
 
 std::filesystem::path user_data_directory() {

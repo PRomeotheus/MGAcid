@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=MGAcid
+GenericName=Native port of Metal Gear Ac!d
+Comment=Play Metal Gear Ac!d natively from your own disc image
+Exec=mgacid
+Icon=io.github.promeotheus.MGAcid
+Terminal=false
+Categories=Game;StrategyGame;
+Keywords=Metal Gear;Acid;Ac!d;MGA;PSP;recompilation;
+StartupNotify=true

@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.promeotheus.MGAcid</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>MGAcid</name>
+  <summary>Native port of Metal Gear Ac!d</summary>
+  <developer id="io.github.promeotheus">
+    <name>PRomeotheus</name>
+  </developer>
+  <description>
+    <p>
+      MGAcid is a native port of Metal Gear Ac!d made by static recompilation:
+      the game's PSP code is translated ahead of time into native code and runs
+      on a reimplementation of the PSP system software, with Vulkan graphics,
+      gamepad support and PSP-compatible saves.
+    </p>
+    <p>
+      It can also play your own recordings in place of the game's music, and
+      draw replacement textures from a folder of your own, enlarged by the
+      engine where the game builds its interface art as it runs.
+    </p>
+    <p>
+      MGAcid does not include any game assets or original game files: no disc
+      image, no copy of the game's executable or data, and no textures, models,
+      audio or video from the game. You must provide the files from your own
+      legally obtained copy of Metal Gear Ac!d (ULUS-10006): the first start
+      checks that copy, accepts only the original release, and sets the game up
+      from it.
+    </p>
+    <p>
+      MGAcid is an independent project, not affiliated with or endorsed by
+      Konami or Sony.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.promeotheus.MGAcid.desktop</launchable>
+  <url type="homepage">https://github.com/PRomeotheus/MGAcid</url>
+  <url type="bugtracker">https://github.com/PRomeotheus/MGAcid/issues</url>
+  <url type="vcs-browser">https://github.com/PRomeotheus/MGAcid</url>
+  <categories>
+    <category>Game</category>
+    <category>StrategyGame</category>
+  </categories>
+  <supports>
+    <control>gamepad</control>
+    <control>keyboard</control>
+  </supports>
+  <content_rating type="oars-1.1">
+    <content_attribute id="violence-realistic">mild</content_attribute>
+  </content_rating>
+  <releases>
+    <release version="@VERSION@" date="@DATE@"/>
+  </releases>
+</component>

@@ -19,7 +19,7 @@ namespace mga::settings {
 enum class PresentMode { Fifo, Mailbox, Immediate };
 enum class PerfDisplay { Off, Overlay, OverlayAndLog, Log };
 enum class RightStick { Camera, DPad, Off };
-// What answers the game when it asks for text such as the hunter's name.
+// What answers the game when it asks for text such as the player's name.
 enum class NameEntry { Keyboard, Fixed };
 
 struct Settings {
@@ -109,7 +109,7 @@ struct Settings {
     bool invert_camera_x{};
     bool invert_camera_y{};
     NameEntry name_entry{NameEntry::Keyboard};  // on-screen keyboard, or the name below at once
-    std::string name{"Hunter"};        // the fixed name
+    std::string name{"Player"};        // the fixed name
 
     // Network (ad hoc play through a PSP ad hoc server)
     bool adhoc{};                      // wireless switch on: the game may go on line

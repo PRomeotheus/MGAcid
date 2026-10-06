@@ -16,15 +16,15 @@
 # Every step is resumable: finished dependencies are kept and ccache holds the
 # compiled code.
 #
-# Environment: YAKUMO_WORK (required) is the work directory; YAKUMO_JOBS the
+# Environment: MGA_WORK (required) is the work directory; MGA_JOBS the
 # number of parallel jobs (default 4).
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 profile_dir="$(cd "$here/../.." && pwd)"
 repo_dir="$(cd "$profile_dir/../.." && pwd)"
-work="${YAKUMO_WORK:?set YAKUMO_WORK to the work directory}"
-jobs="${YAKUMO_JOBS:-4}"
+work="${MGA_WORK:?set MGA_WORK to the work directory}"
+jobs="${MGA_JOBS:-4}"
 # shellcheck source=sources.sh
 source "$here/sources.sh"
 

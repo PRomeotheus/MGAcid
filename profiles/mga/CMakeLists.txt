@@ -259,6 +259,20 @@ if(MGA_RENDERER)
         "${CMAKE_CURRENT_BINARY_DIR}/generated_version"
         "${MGA_PROFILE_DIR}/third_party/imgui")
     target_link_libraries(MGAcid PRIVATE SDL3::SDL3 Vulkan::Vulkan)
+    # Windows looks for a DLL beside the executable, and nothing was putting
+    # SDL3's there: the FFmpeg ones are copied by cmake/FFmpeg.cmake, so this
+    # was the one library every developer had to copy by hand, and the release
+    # script found it missing from a build directory nobody had copied it into.
+    # CMake knows where it is, so ask it rather than searching for it.
+    if(WIN32)
+        get_target_property(_mga_sdl3_type SDL3::SDL3 TYPE)
+        if(_mga_sdl3_type STREQUAL "SHARED_LIBRARY")
+            add_custom_command(TARGET MGAcid POST_BUILD
+                COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                        "$<TARGET_FILE:SDL3::SDL3>" "$<TARGET_FILE_DIR:MGAcid>"
+                COMMENT "Copying SDL3.dll next to MGAcid")
+        endif()
+    endif()
 endif()
 # The host only: the generated code never sees FFmpeg.
 mga_use_ffmpeg(MGAcid)

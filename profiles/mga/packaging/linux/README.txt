@@ -14,8 +14,15 @@ Start it with
 
 The first start asks for your disc image, copies it into MGAcid's data
 directory (~/.local/share/MGAcid/MGA) and prepares the game from it. After
-that the game starts straight away. Saves are kept in the same directory,
-under ms0/PSP/SAVEDATA.
+that the game starts straight away.
+
+Your saves, and the folders for replacement textures and music, are kept
+beside the mgacid program, so this folder can be moved or carried on a drive:
+ms0/, textures/ and music/, each with a README saying what belongs in it. Any
+of the three can be pointed elsewhere from the menu, under System > Folders.
+Where the program sits in a read-only place -- the Flatpak, or a system-wide
+install -- they go to the data directory above instead, and the game says so
+once at startup.
 
     ./mgacid --install /path/to/image.iso   set up from a terminal instead
     ./mgacid --help                         all options

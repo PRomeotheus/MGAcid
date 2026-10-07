@@ -94,6 +94,16 @@ done
 step "Generating the recompiled code"
 "$profile_dir/scripts/generate.sh" "$build"
 
+# The game's own libraries -- the file system, the sound driver, zlib and every
+# stage -- are separate corpora. Without this they are not absent, which would
+# be noticed: they fall back to the interpreter and run about twenty times
+# slower, which is only visible as a release that stutters where a developer
+# build does not. The stage modules come from the disc image; the four loaded
+# from memory need the dumps in game/dumps, and the script names any it cannot
+# generate rather than failing.
+step "Generating the game's own modules"
+"$profile_dir/scripts/generate_modules.sh" "$build"
+
 step "Building MGAcid"
 cmake --build "$build" -j "$jobs" --target MGAcid mga_savedata_tests
 "$build/bin/mga_savedata_tests"

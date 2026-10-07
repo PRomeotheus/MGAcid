@@ -45,7 +45,7 @@ profiles/mga/scripts/generate_modules.sh
 cmake -S . -B out/mga
 cmake --build out/mga --target MGAcid
 
-# 5. Run (on Windows, copy SDL3.dll next to MGAcid.exe first)
+# 5. Run
 out/mga/bin/MGAcid
 ```
 

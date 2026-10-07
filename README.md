@@ -41,9 +41,37 @@ The game boots, plays and saves. The parts below are what has actually been exer
 
 Multiplayer is **not** supported: the ad hoc networking in the tree comes from the upstream profile and is specific to that game.
 
+## Install and play
+
+Download the release for your system from the [releases page](https://github.com/PRomeotheus/MGAcid/releases). You need **your own disc image** of Metal Gear Ac!d (`ULUS-10006`) as an uncompressed `.iso`; nothing from the game is included here, and the first start checks your copy and accepts only the USA release.
+
+**Windows** — unzip `mgacid-<version>-windows-x86_64.zip` anywhere you like and run `MGAcid.exe`. Keep the folder together: the DLLs beside the executable are part of it. Windows 10 or newer, 64-bit, with the normal graphics driver for your card.
+
+**Linux** — either the Flatpak, which is the one for the Steam Deck:
+
+```bash
+flatpak install --user mgacid-<version>-linux-x86_64.flatpak
+flatpak run io.github.promeotheus.MGAcid
+```
+
+or the portable tarball, which installs nothing:
+
+```bash
+tar -xzf mgacid-<version>-linux-x86_64.tar.gz
+cd mgacid-<version>-linux-x86_64 && ./mgacid
+```
+
+glibc 2.31 or newer, a Vulkan driver (Mesa on AMD and Intel, or NVIDIA's) and Wayland or X11. On a Steam Deck, add `./mgacid` to Steam as a non-Steam game, and do the first start in Desktop Mode, since it asks for your disc image.
+
+**The first start** opens the setup in the game's window and works with a gamepad alone: point it at your `.iso`, and it checks the image, prepares the game from it and keeps it in a per-user data directory. After that the game starts straight away.
+
+**In the game**, Esc or both sticks pressed together (L3+R3) opens the menu. It pauses the game and holds the picture, sound, control and folder settings, which are kept between runs.
+
+[`docs/LINUX.md`](docs/LINUX.md) covers the Linux side in more detail: Game Mode, where saves live, updating and uninstalling.
+
 ## Requirements
 
-Building from source is currently the way to play. It needs:
+Building from source is also fully supported, and is the only way to play until there is a release for your system. It needs:
 
 - Your own copy of the game (see above)
 - CMake 3.20 or newer, Ninja and a C++20 compiler

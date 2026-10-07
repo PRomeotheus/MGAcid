@@ -102,7 +102,7 @@ Open the **x64 Native Tools Command Prompt** of your Visual Studio or Build Tool
 Then follow the [build steps](#build-steps) in that Bash, with these differences:
 - **SDL3 location.** Add `-DCMAKE_PREFIX_PATH="C:/path/to/SDL3"` to the first `cmake` command.
 - **Paths.** The executable is `out/mga/bin/MGAcid.exe`, and the per-user data directory is `$APPDATA/MGAcid/MGA`.
-- **DLLs.** Before playing, copy `SDL3.dll` next to `MGAcid.exe`, or put its directory on `PATH`. The FFmpeg DLLs are already there.
+- **DLLs.** SDL3 and the FFmpeg libraries are copied next to `MGAcid.exe` by the build; nothing has to be put on `PATH`.
 
 Windows specifics:
 - **Data directory.** Step 2 writes `EBOOT.ELF` and `settings.ini` to the per-user data directory. It takes precedence over `profiles/mga/game`, and both hold the same data after step 3.

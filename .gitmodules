@@ -1,0 +1,3 @@
+[submodule "external/PSPRecomp"]
+	path = external/PSPRecomp
+	url = https://github.com/PRomeotheus/PSPRecomp.git

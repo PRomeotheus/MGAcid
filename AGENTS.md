@@ -2,21 +2,29 @@
 
 Working notes for anyone changing this repository: people and coding agents alike. Read this first. It is short on purpose and links to the longer documents instead of repeating them.
 
-MGAcid is a native port of *Metal Gear Ac!d* (`ULUS-10006`). It recompiles the game's PSP (MIPS) code to C++ ahead of time and supplies the PSP system around it: the kernel, HLE modules, a Vulkan GE renderer, audio, input, save data and an ImGui interface. (Ad hoc networking is in the tree but belongs to the port this was derived from; Ac!d does not use it.) The C++ lives in `profiles/mga/host/` (the port) and `include/psprecomp/` plus `src/` (the reusable runtime and recompiler).
+MGAcid is a native port of *Metal Gear Ac!d* (`ULUS-10006`). It recompiles the game's PSP (MIPS) code to C++ ahead of time and supplies the PSP system around it: the kernel, HLE modules, a Vulkan GE renderer, audio, input, save data and an ImGui interface. (Ad hoc networking is in the tree but belongs to the port this was derived from; Ac!d does not use it.) This repository holds only what is the game's own; the runtime, the recompiler and the shared host (kernel, HLE, renderer, audio, interface, saves) are the PSPRecomp framework's.
+
+
+## This repository and the framework
+
+- **The framework is a separate repository**, PRomeotheus/PSPRecomp. In the PSPRecomp workspace it is the live checkout at `../../framework`; in a clone of this repository alone it is the submodule `external/PSPRecomp` (`git submodule update --init`). Its AGENTS.md and docs/GAME_REPOSITORY.md apply here too.
+- **Fix shared things in the framework, not here.** A missing or wrong PSP call, the renderer, audio, the menu, saves, save states: change `../../framework`, so every game gets it, and build at least this game against it. This repository is for what is only MGAcid's: `host/install/game_identity.hpp`, `host/hle/hle_game.cpp`, `host/game_hooks.cpp` and any file under `host/` that replaces a shared one, plus scripts, packaging and the corpus.
+- **Build**: `cmake --preset win-amd64` (or `linux-amd64`), then `cmake --build --preset win-amd64`; the executable is `out/build/win-amd64/bin/MGAcid`. In the workspace, `source ../../pspenv.sh`, then `psp-use`, `psp-build`, `psp-test`, `psp-run`.
+- **Environment variables** keep the `MGA_` prefix.
 
 ## Rules
 
 - **English only** in everything committed: code, comments, docs, commit messages, pull requests. The only exceptions are the translations `README.ru.md` and `README.es.md`, and they change in the same pull request as `README.md`.
 - **Branch and pull request.** Never push to `main`. Pull requests are merged by rebase; keep a clean, reviewable commit series.
-- **No game data, ever.** Disc images, `EBOOT`/`DATA.BIN` contents, the generated code (`profiles/mga/generated/`), overlay corpora, and saves stay local; they are ignored by Git. The same goes for anything personal: home paths, user names, machine names, addresses.
-- **Write it yourself.** Read public documentation and other projects to understand the PSP, file formats and protocols. Never copy, paste or line-by-line translate code from a project whose licence is incompatible with this repository's MIT licence. Constants, offsets and format facts are fine. Record where intentionally included third-party code comes from; see [SOURCE_PROVENANCE.md](docs/SOURCE_PROVENANCE.md).
+- **No game data, ever.** Disc images, `EBOOT`/`DATA.BIN` contents, the generated code (`generated/`), overlay corpora, and saves stay local; they are ignored by Git. The same goes for anything personal: home paths, user names, machine names, addresses.
+- **Write it yourself.** Read public documentation and other projects to understand the PSP, file formats and protocols. Never copy, paste or line-by-line translate code from a project whose licence is incompatible with this repository's MIT licence. Constants, offsets and format facts are fine. Record where intentionally included third-party code comes from; see [SOURCE_PROVENANCE.md](https://github.com/PRomeotheus/PSPRecomp/blob/main/docs/SOURCE_PROVENANCE.md).
 - **Say what you did not verify.** A pull request lists what was tested, on which platform, and what was not.
 
 ## Building without waiting hours
 
-[docs/BUILDING.md](docs/BUILDING.md) is the full guide. A full build from a fresh clone takes about two hours on an M1 and longer on weaker machines. Most of that can be skipped:
+[docs/BUILDING.md](https://github.com/PRomeotheus/PSPRecomp/blob/main/docs/BUILDING.md) is the full guide. A full build from a fresh clone takes about two hours on an M1 and longer on weaker machines. Most of that can be skipped:
 
-- **Generated code.** Copy `profiles/mga/generated/` from a checkout that already has it with a plain `cp -R`, not a copy that keeps old timestamps.
+- **Generated code.** Copy `generated/` from a checkout that already has it with a plain `cp -R`, not a copy that keeps old timestamps.
 - **Overlays.** Don't rebuild them per checkout: `MGA_OVERLAY_DIR=/path/to/out/mga/bin/overlays`. This is safe while `include/psprecomp/` is unchanged.
 - **ccache.** Install it; the build uses it automatically, across checkouts.
 - **Game data.** Set `MGA_GAME_DIR` to a game directory instead of running `prepare_game.sh` in every clone.
@@ -25,10 +33,10 @@ MGAcid is a native port of *Metal Gear Ac!d* (`ULUS-10006`). It recompiles the g
 
 ## Running and testing
 
-- **Bound every run.** `timeout 60 out/mga/bin/MGAcid`. Never leave a game running, and never drive it with an open-ended input loop, such as pressing confirm forever: it does not converge, and someone may be watching the screen.
+- **Bound every run.** `timeout 60 out/build/win-amd64/bin/MGAcid`. Never leave a game running, and never drive it with an open-ended input loop, such as pressing confirm forever: it does not converge, and someone may be watching the screen.
 - **Quick boot checks.** `MGA_NO_RENDER=1 MGA_NO_AUDIO=1 timeout 40 …`, then look for the function count and `[overlay] installed` in the output.
 - **Scripted input and captures.**
-  - `MGA_INPUT_SCRIPT` sends keys, virtual gamepad input and dropped files, and captures the window. The syntax is in `profiles/mga/host/ui/input_script.hpp`.
+  - `MGA_INPUT_SCRIPT` sends keys, virtual gamepad input and dropped files, and captures the window. The syntax is in `host/ui/input_script.hpp`.
   - `MGA_SCREENSHOT_DIR` captures the game's own frames.
   - Look at the captures; don't assume.
 - **Several instances.** For multiplayer or before/after comparisons, give each instance its own `MGA_DATA_DIR`, its own saves, and an `MGA_WINDOW_TITLE`.
@@ -37,9 +45,9 @@ MGAcid is a native port of *Metal Gear Ac!d* (`ULUS-10006`). It recompiles the g
   - Speed must stay at 100%; the game runs at 30 frames per emulated second.
 - **Tracing.**
   - `MGA_TRACE_*` variables log one subsystem each: GE, material and lighting registers, save data, fonts, pad, audio, ATRAC, MPEG, ad hoc, I/O, kernel.
-  - All the variables are listed under *Diagnostics* in the [profile README](profiles/mga/README.md#diagnostics).
-- **Unit tests.** `cmake --build out/mga --target psprecomp_tests mga_savedata_tests && ctest --test-dir out/mga`.
-- **Manual smoke test.** [TESTING.md](docs/TESTING.md), about fifteen minutes. Record a result with the commit it was tested at.
+  - All the variables are listed under *Diagnostics* in the [profile README](docs/PROFILE.md#diagnostics).
+- **Unit tests.** `cmake --build --preset win-amd64 --target psprecomp_tests mga_savedata_tests && ctest --preset win-amd64`.
+- **Manual smoke test.** [TESTING.md](https://github.com/PRomeotheus/PSPRecomp/blob/main/docs/TESTING.md), about fifteen minutes. Record a result with the commit it was tested at.
 
 ## Lessons that cost real time
 

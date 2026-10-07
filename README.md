@@ -67,7 +67,7 @@ glibc 2.31 or newer, a Vulkan driver (Mesa on AMD and Intel, or NVIDIA's) and Wa
 
 **In the game**, Esc or both sticks pressed together (L3+R3) opens the menu. It pauses the game and holds the picture, sound, control and folder settings, which are kept between runs.
 
-[`docs/LINUX.md`](docs/LINUX.md) covers the Linux side in more detail: Game Mode, where saves live, updating and uninstalling.
+[`docs/LINUX.md`](https://github.com/PRomeotheus/PSPRecomp/blob/main/docs/LINUX.md) covers the Linux side in more detail: Game Mode, where saves live, updating and uninstalling.
 
 ## Requirements
 
@@ -84,26 +84,26 @@ Building from source is also fully supported, and is the only way to play until 
 
 ```bash
 # 1. Configure and build the bootstrap
-cmake -S . -B out/mga -G Ninja -DCMAKE_BUILD_TYPE=Release -DPSPRECOMP_PROFILE=mga \
+cmake --preset win-amd64
       -DCMAKE_PREFIX_PATH="/path/to/SDL3"
-cmake --build out/mga --target MGAcid
+cmake --build --preset win-amd64 --target MGAcid
 
 # 2. Game data: extracts BOOT.BIN as EBOOT.ELF and links the image
-profiles/mga/scripts/prepare_game.sh "/path/to/Metal Gear Acid (USA).iso"
+scripts/prepare_game.sh "/path/to/Metal Gear Acid (USA).iso"
 
 # 3. Generate the recompiled executable and build it
-profiles/mga/scripts/generate.sh
-cmake -S . -B out/mga && cmake --build out/mga --target MGAcid
+scripts/generate.sh
+cmake --preset win-amd64
 
 # 4. Recompile the game's own libraries and rebuild
-profiles/mga/scripts/generate_modules.sh
-cmake -S . -B out/mga && cmake --build out/mga --target MGAcid
+scripts/generate_modules.sh
+cmake --preset win-amd64
 
 # 5. Run
-out/mga/bin/MGAcid
+out/build/win-amd64/bin/MGAcid
 ```
 
-The full instructions, every environment variable and how the stages are recompiled are in [`profiles/mga/README.md`](profiles/mga/README.md). Building on each platform is in [`docs/BUILDING.md`](docs/BUILDING.md).
+The full instructions, every environment variable and how the stages are recompiled are in [`docs/PROFILE.md`](docs/PROFILE.md). Building on each platform is in [`docs/BUILDING.md`](https://github.com/PRomeotheus/PSPRecomp/blob/main/docs/BUILDING.md).
 
 ## Your files
 
@@ -129,7 +129,7 @@ The executable is analyzed and every instruction of its code is emitted as C++, 
 
 Around that code sits a reimplementation of the PSP system: a kernel with threads, semaphores, event flags and timers; disc I/O read straight from the image; a Vulkan renderer for the PSP's graphics engine; software voice mixing for audio; and input from SDL3.
 
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) describes the execution model. [`docs/TESTING.md`](docs/TESTING.md) has the smoke test.
+[`docs/ARCHITECTURE.md`](https://github.com/PRomeotheus/PSPRecomp/blob/main/docs/ARCHITECTURE.md) describes the execution model. [`docs/TESTING.md`](https://github.com/PRomeotheus/PSPRecomp/blob/main/docs/TESTING.md) has the smoke test.
 
 ## Repository layout
 
@@ -138,7 +138,7 @@ include/psprecomp/   Framework interfaces: runtime, memory, Allegrex state
 src/                 Framework: ELF loading, decoder, runtime, interpreter
 tools/               Framework: analyzer and C++ code generator
 tests/               Framework regression tests
-profiles/mga/        Everything specific to Metal Gear Ac!d: host, kernel,
+        Everything specific to Metal Gear Ac!d: host, kernel,
                      renderer, audio, input, configuration and build scripts
 docs/                Architecture, archive format, profile guide, source rules
 ```

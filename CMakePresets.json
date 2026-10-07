@@ -1,0 +1,44 @@
+{
+    "version": 3,
+    "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+    "configurePresets": [
+        {
+            "name": "base",
+            "hidden": true,
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/out/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_PREFIX_PATH": "$penv{SDL3_ROOT}"
+            }
+        },
+        {
+            "name": "win-amd64",
+            "displayName": "Windows x64, MSVC, Release",
+            "description": "Run from an x64 Native Tools prompt (or Git Bash started from one). SDL3_ROOT names the SDL3 directory.",
+            "inherits": "base",
+            "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+        },
+        {
+            "name": "win-amd64-debug",
+            "displayName": "Windows x64, MSVC, RelWithDebInfo",
+            "inherits": "win-amd64",
+            "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" }
+        },
+        {
+            "name": "linux-amd64",
+            "displayName": "Linux x64 (and the Steam Deck), Release",
+            "inherits": "base",
+            "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" }
+        }
+    ],
+    "buildPresets": [
+        { "name": "win-amd64", "configurePreset": "win-amd64" },
+        { "name": "win-amd64-debug", "configurePreset": "win-amd64-debug" },
+        { "name": "linux-amd64", "configurePreset": "linux-amd64" }
+    ],
+    "testPresets": [
+        { "name": "win-amd64", "configurePreset": "win-amd64", "output": { "outputOnFailure": true } },
+        { "name": "linux-amd64", "configurePreset": "linux-amd64", "output": { "outputOnFailure": true } }
+    ]
+}

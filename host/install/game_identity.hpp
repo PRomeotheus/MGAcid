@@ -44,8 +44,33 @@ inline constexpr std::uint32_t kSystemLanguage = 0u;
 inline constexpr std::uint32_t kConfirmButton = 0u;
 inline constexpr bool kDefaultConfirmSouth = false;
 
+// Whether the game's own confirm is cross (x) rather than circle. The pad
+// sends cross from the bottom button unless input.confirm swaps it, and the
+// port's menu confirms with whichever button sends the game's confirm.
+inline constexpr bool kGameConfirmIsCross = false;
+
 // The font cache reset (hle/hle_font.cpp): return address of the game's only call that asks for glyph images.
 inline constexpr std::uint32_t kGlyphImageCaller = 0x088EA3A4u;
+
+// Whether the game has ad hoc (wireless) multiplayer. Without it the menu's
+// Network section is hidden: hosting or joining a session means nothing to a
+// single-player game.
+inline constexpr bool kHasAdhoc = true;
+
+// Whether host/kernel/scene.cpp reads this game's scene (the world matrix and
+// where characters stand). Without one, cast shadows have nothing to work
+// from, so the menu leaves that row out.
+inline constexpr bool kHasSceneReader = true;
+
+// Whether the game already runs at sixty frames a second on the PSP. The
+// menu's FPS row (30 / 60 / smoothed) then has nothing to offer and is hidden.
+inline constexpr bool kNative60 = false;
+
+// Whether the depth buffer holds the scene's real depth. Contact shadows are
+// read from it; a game that projects its geometry itself and hands the GE
+// flat or per-polygon depth gets creases everywhere, so they are off and the
+// row is hidden.
+inline constexpr bool kSceneDepth = true;
 
 // Fixed overlay slots, ending with an end marker. Ac!d loads relocatable stage modules through ModuleMgr instead; the single entry is only an end marker.
 inline constexpr std::uint32_t kOverlaySlots[] = {

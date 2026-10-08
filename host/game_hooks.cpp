@@ -48,4 +48,10 @@ bool module_start_take_over(psprecomp::Runtime &runtime, psprecomp::AllegrexCont
     return sweep_take_over(runtime, ctx, module);
 }
 
+// No options of its own.
+const std::vector<Option> &options() {
+    static const std::vector<Option> none;
+    return none;
+}
+
 } // namespace psphost::game
